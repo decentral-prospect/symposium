@@ -1,0 +1,23 @@
+# Android Studio / IntelliJ
+.idea/
+*.iml
+
+# Gradle
+.gradle/
+
+# Local config
+local.properties
+
+# macOS
+.DS_Store
+
+# Build outputs
+/build/
+/app/build/
+/app/release/
+/captures/
+/.externalNativeBuild/
+/.cxx/
+
+# Symposium bundled server binary
+app/src/main/assets/symposium/symposium-server-linux-amd64

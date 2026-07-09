@@ -1,0 +1,5 @@
+<resources>
+    <string name="app_name">Symposium</string>
+    <string name="call_in_progress">Call in progress</string>
+    <string name="call_active">Voice connection active</string>
+</resources>
