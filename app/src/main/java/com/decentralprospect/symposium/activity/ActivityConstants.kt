@@ -1,7 +1,7 @@
 package com.decentralprospect.symposium
 
 internal const val TAG = "RTC_APP"
-internal const val APP_VERSION = "v0.3.1"
+internal const val APP_VERSION = "v0.3.2"
 internal const val EXPECTED_RELAY_VERSION = APP_VERSION
 internal const val TARGET_PUBLISH = "publish"
 internal const val TARGET_SUBSCRIBE = "subscribe"

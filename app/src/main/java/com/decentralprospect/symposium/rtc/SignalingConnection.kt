@@ -317,6 +317,9 @@ internal fun CallRuntime.updateReconnectTokenFromServer(msg: JSONObject) {
 
 internal fun CallRuntime.handleLobbyWait(msg: JSONObject) {
     updateReconnectTokenFromServer(msg)
+    if (reconnectMode) {
+        stopReconnectMode()
+    }
     joinedRoom = false
     mediaOnline = false
     lobbyWaiting = true

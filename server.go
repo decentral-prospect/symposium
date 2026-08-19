@@ -32,8 +32,8 @@ import (
 const (
 	roleGuest        = "guest"
 	roleModerator    = "moderator"
-	adminTokenHeader = "X-Symposium-Admin-Token"
-	serverVersion    = "v0.3.1"
+	adminTokenHeader = "X-Relay-Key"
+	serverVersion    = "v0.3.2"
 
 	maxWSMessageBytes    = 1024 * 1024
 	maxSignalTypeLen     = 64
@@ -145,6 +145,10 @@ type server struct {
 
 	adminToken    string
 	publicBaseURL string
+	instanceName  string
+	dbTable       string
+	dbRoomColumn  string
+	dbKeyColumn   string
 
 	mu        sync.RWMutex
 	rooms     map[string]*room
@@ -758,13 +762,17 @@ func cloneRTPPacket(pkt *rtp.Packet) *rtp.Packet {
 	return &out
 }
 
-func newServer(iceURLs []string, includeLoopback bool, nat1to1IPs []string, publicIP string, dbPath string, adminToken string, publicBaseURL string, iceUDPPortMin uint16, iceUDPPortMax uint16) *server {
+func newServer(iceURLs []string, includeLoopback bool, nat1to1IPs []string, publicIP string, dbPath string, dbTable string, dbRoomColumn string, dbKeyColumn string, adminToken string, publicBaseURL string, instanceName string, iceUDPPortMin uint16, iceUDPPortMax uint16) *server {
 	adminToken = strings.TrimSpace(adminToken)
 	if adminToken == "" {
 		log.Fatalf("admin token is required")
 	}
 
 	publicBaseURL = strings.TrimRight(strings.TrimSpace(publicBaseURL), "/")
+	instanceName = strings.TrimSpace(instanceName)
+	if instanceName == "" {
+		log.Fatalf("instance name is required")
+	}
 
 	var m webrtc.MediaEngine
 	if err := m.RegisterDefaultCodecs(); err != nil {
@@ -830,16 +838,23 @@ func newServer(iceURLs []string, includeLoopback bool, nat1to1IPs []string, publ
 		}
 	}
 
+	dbTable = mustSQLIdentifier("db table", dbTable)
+	dbRoomColumn = mustSQLIdentifier("db room column", dbRoomColumn)
+	dbKeyColumn = mustSQLIdentifier("db key column", dbKeyColumn)
+	if dbRoomColumn == dbKeyColumn {
+		log.Fatalf("db room and key columns must be different")
+	}
+
 	db, err := sql.Open("sqlite3", dbPath)
 	if err != nil {
 		log.Fatalf("open sqlite: %v", err)
 	}
-	if err := ensureRoomSchema(db); err != nil {
+	if err := ensureRoomSchema(db, dbTable, dbRoomColumn, dbKeyColumn); err != nil {
 		log.Fatalf("init sqlite schema: %v", err)
 	}
 
 	openRooms := make(map[string]string)
-	rows, err := db.Query(`SELECT name, moderator_key FROM open_rooms`)
+	rows, err := db.Query(fmt.Sprintf("SELECT %s, %s FROM %s", quoteSQLIdentifier(dbRoomColumn), quoteSQLIdentifier(dbKeyColumn), quoteSQLIdentifier(dbTable)))
 	if err != nil {
 		log.Fatalf("load open rooms: %v", err)
 	}
@@ -858,7 +873,8 @@ func newServer(iceURLs []string, includeLoopback bool, nat1to1IPs []string, publ
 		}
 		if moderatorKey == "" {
 			moderatorKey = mustGenerateModeratorKey()
-			if _, err := db.Exec(`UPDATE open_rooms SET moderator_key = ? WHERE name = ?`, moderatorKey, name); err != nil {
+			query := fmt.Sprintf("UPDATE %s SET %s = ? WHERE %s = ?", quoteSQLIdentifier(dbTable), quoteSQLIdentifier(dbKeyColumn), quoteSQLIdentifier(dbRoomColumn))
+			if _, err := db.Exec(query, moderatorKey, name); err != nil {
 				log.Fatalf("backfill moderator key for room %q: %v", name, err)
 			}
 		}
@@ -871,44 +887,42 @@ func newServer(iceURLs []string, includeLoopback bool, nat1to1IPs []string, publ
 		db:            db,
 		adminToken:    adminToken,
 		publicBaseURL: publicBaseURL,
+		instanceName:  instanceName,
+		dbTable:       dbTable,
+		dbRoomColumn:  dbRoomColumn,
+		dbKeyColumn:   dbKeyColumn,
 		rooms:         make(map[string]*room),
 		openRooms:     openRooms,
 	}
 }
 
-func ensureRoomSchema(db *sql.DB) error {
-	if _, err := db.Exec(`CREATE TABLE IF NOT EXISTS open_rooms (name TEXT PRIMARY KEY)`); err != nil {
-		return err
+func mustSQLIdentifier(label string, value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" || len(value) > 63 {
+		log.Fatalf("invalid %s", label)
 	}
-
-	rows, err := db.Query(`PRAGMA table_info(open_rooms)`)
-	if err != nil {
-		return err
-	}
-	defer rows.Close()
-
-	hasModeratorKey := false
-	for rows.Next() {
-		var cid int
-		var name string
-		var typ string
-		var notNull int
-		var dflt any
-		var pk int
-		if err := rows.Scan(&cid, &name, &typ, &notNull, &dflt, &pk); err != nil {
-			return err
+	for i, r := range value {
+		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || r == '_' || (i > 0 && r >= '0' && r <= '9') {
+			continue
 		}
-		if name == "moderator_key" {
-			hasModeratorKey = true
-		}
+		log.Fatalf("invalid %s", label)
 	}
+	return value
+}
 
-	if !hasModeratorKey {
-		if _, err := db.Exec(`ALTER TABLE open_rooms ADD COLUMN moderator_key TEXT NOT NULL DEFAULT ''`); err != nil {
-			return err
-		}
-	}
-	return nil
+func quoteSQLIdentifier(value string) string {
+	return `"` + strings.ReplaceAll(value, `"`, `""`) + `"`
+}
+
+func ensureRoomSchema(db *sql.DB, table string, roomColumn string, keyColumn string) error {
+	query := fmt.Sprintf(
+		"CREATE TABLE IF NOT EXISTS %s (%s TEXT PRIMARY KEY, %s TEXT NOT NULL DEFAULT '')",
+		quoteSQLIdentifier(table),
+		quoteSQLIdentifier(roomColumn),
+		quoteSQLIdentifier(keyColumn),
+	)
+	_, err := db.Exec(query)
+	return err
 }
 
 func (s *server) roomModeratorKey(name string) (string, bool) {
@@ -929,21 +943,25 @@ func (s *server) openRoom(name string) (string, error) {
 		moderatorKey = mustGenerateModeratorKey()
 	}
 
-	if _, err := s.db.Exec(`INSERT OR IGNORE INTO open_rooms(name, moderator_key) VALUES(?, ?)`, name, moderatorKey); err != nil {
+	insertQuery := fmt.Sprintf("INSERT OR IGNORE INTO %s(%s, %s) VALUES(?, ?)", quoteSQLIdentifier(s.dbTable), quoteSQLIdentifier(s.dbRoomColumn), quoteSQLIdentifier(s.dbKeyColumn))
+	if _, err := s.db.Exec(insertQuery, name, moderatorKey); err != nil {
 		return "", err
 	}
-	if _, err := s.db.Exec(`UPDATE open_rooms SET moderator_key = CASE WHEN moderator_key = '' THEN ? ELSE moderator_key END WHERE name = ?`, moderatorKey, name); err != nil {
+	updateIfEmptyQuery := fmt.Sprintf("UPDATE %s SET %s = CASE WHEN %s = '' THEN ? ELSE %s END WHERE %s = ?", quoteSQLIdentifier(s.dbTable), quoteSQLIdentifier(s.dbKeyColumn), quoteSQLIdentifier(s.dbKeyColumn), quoteSQLIdentifier(s.dbKeyColumn), quoteSQLIdentifier(s.dbRoomColumn))
+	if _, err := s.db.Exec(updateIfEmptyQuery, moderatorKey, name); err != nil {
 		return "", err
 	}
 
 	var storedKey string
-	if err := s.db.QueryRow(`SELECT moderator_key FROM open_rooms WHERE name = ?`, name).Scan(&storedKey); err != nil {
+	selectQuery := fmt.Sprintf("SELECT %s FROM %s WHERE %s = ?", quoteSQLIdentifier(s.dbKeyColumn), quoteSQLIdentifier(s.dbTable), quoteSQLIdentifier(s.dbRoomColumn))
+	if err := s.db.QueryRow(selectQuery, name).Scan(&storedKey); err != nil {
 		return "", err
 	}
 	storedKey = strings.TrimSpace(storedKey)
 	if storedKey == "" {
 		storedKey = moderatorKey
-		if _, err := s.db.Exec(`UPDATE open_rooms SET moderator_key = ? WHERE name = ?`, storedKey, name); err != nil {
+		updateQuery := fmt.Sprintf("UPDATE %s SET %s = ? WHERE %s = ?", quoteSQLIdentifier(s.dbTable), quoteSQLIdentifier(s.dbKeyColumn), quoteSQLIdentifier(s.dbRoomColumn))
+		if _, err := s.db.Exec(updateQuery, storedKey, name); err != nil {
 			return "", err
 		}
 	}
@@ -964,7 +982,8 @@ func (s *server) closeRoom(name string) error {
 		return fmt.Errorf("room name is required")
 	}
 
-	if _, err := s.db.Exec(`DELETE FROM open_rooms WHERE name = ?`, name); err != nil {
+	deleteQuery := fmt.Sprintf("DELETE FROM %s WHERE %s = ?", quoteSQLIdentifier(s.dbTable), quoteSQLIdentifier(s.dbRoomColumn))
+	if _, err := s.db.Exec(deleteQuery, name); err != nil {
 		return err
 	}
 
@@ -1019,12 +1038,12 @@ func (s *server) listOpenRooms() []openRoomResponse {
 			ModeratorKey: moderatorKey,
 			GuestLinkData: linkDataSnapshot{
 				Room:     roomName,
-				DeepLink: buildSymposiumDeepLink(url.Values{"room": []string{roomName}}),
+				DeepLink: buildClientDeepLink(url.Values{"room": []string{roomName}}),
 			},
 			ModLinkData: linkDataSnapshot{
 				Room:         roomName,
 				ModeratorKey: moderatorKey,
-				DeepLink:     buildSymposiumDeepLink(url.Values{"room": []string{roomName}, "modKey": []string{moderatorKey}}),
+				DeepLink:     buildClientDeepLink(url.Values{"room": []string{roomName}, "modKey": []string{moderatorKey}}),
 			},
 		})
 	}
@@ -1084,12 +1103,12 @@ func (s *server) adminOpenRoomHandler(w http.ResponseWriter, r *http.Request) {
 		GuestLinkData: linkDataSnapshot{
 			Room:         name,
 			HTTPRedirect: base + "/connect?" + guestQuery.Encode(),
-			DeepLink:     buildSymposiumDeepLink(guestQuery),
+			DeepLink:     buildClientDeepLink(guestQuery),
 		},
 		ModLinkData: linkDataSnapshot{
 			Room:         name,
 			ModeratorKey: moderatorKey,
-			DeepLink:     buildSymposiumDeepLink(modQuery),
+			DeepLink:     buildClientDeepLink(modQuery),
 		},
 	}
 
@@ -1135,7 +1154,7 @@ func (s *server) adminVersionHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(versionResponse{
-		Name:    "SymposiumRelay",
+		Name:    s.instanceName,
 		Version: serverVersion,
 	})
 }
@@ -1152,7 +1171,7 @@ func (s *server) connectRedirectHandler(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	http.Redirect(w, r, buildSymposiumDeepLink(q), http.StatusFound)
+	http.Redirect(w, r, buildClientDeepLink(q), http.StatusFound)
 }
 
 func validateConnectParams(in url.Values) (url.Values, error) {
@@ -1204,7 +1223,7 @@ func validateConnectParams(in url.Values) (url.Values, error) {
 	return out, nil
 }
 
-func buildSymposiumDeepLink(q url.Values) string {
+func buildClientDeepLink(q url.Values) string {
 	u := url.URL{
 		Scheme:   "symposium",
 		Host:     "connect",
@@ -3355,12 +3374,12 @@ func hWithCORS(h http.Handler) http.Handler {
 func readAdminTokenFromConfig(argToken string, argTokenFile string) string {
 	adminToken := strings.TrimSpace(argToken)
 	if adminToken == "" {
-		adminToken = strings.TrimSpace(os.Getenv("SYMPOSIUM_ADMIN_TOKEN"))
+		adminToken = strings.TrimSpace(os.Getenv("RELAY_ADMIN_TOKEN"))
 	}
 
 	adminTokenFile := strings.TrimSpace(argTokenFile)
 	if adminTokenFile == "" {
-		adminTokenFile = strings.TrimSpace(os.Getenv("SYMPOSIUM_ADMIN_TOKEN_FILE"))
+		adminTokenFile = strings.TrimSpace(os.Getenv("RELAY_ADMIN_TOKEN_FILE"))
 	}
 
 	if adminToken == "" && adminTokenFile != "" {
@@ -3372,7 +3391,7 @@ func readAdminTokenFromConfig(argToken string, argTokenFile string) string {
 	}
 
 	if adminToken == "" {
-		log.Fatalf("admin token is required: use --admin-token-file, --admin-token, SYMPOSIUM_ADMIN_TOKEN_FILE, or SYMPOSIUM_ADMIN_TOKEN")
+		log.Fatalf("admin token is required: use --admin-token-file, --admin-token, RELAY_ADMIN_TOKEN_FILE, or RELAY_ADMIN_TOKEN")
 	}
 
 	return adminToken
@@ -3401,16 +3420,22 @@ func envUint16OrDefault(name string, fallback uint16) uint16 {
 func main() {
 	var (
 		addr              = flag.String("addr", ":3001", "public HTTP listen address, e.g. :3001")
-		adminAddr         = flag.String("admin-addr", envOrDefault("SYMPOSIUM_ADMIN_ADDR", "127.0.0.1:3002"), "admin HTTP listen address for /admin/* endpoints")
+		instanceNameArg   = flag.String("instance-name", envOrDefault("RELAY_INSTANCE_NAME", "relay"), "instance name returned by the admin version endpoint")
+		adminAddr         = flag.String("admin-addr", envOrDefault("RELAY_ADMIN_ADDR", "127.0.0.1:3002"), "admin HTTP listen address for /admin/* endpoints")
 		adminOnPublic     = flag.Bool("admin-on-public", false, "also expose /admin/* on the public listener; not recommended unless protected by a reverse proxy")
 		publicBaseURLArg  = flag.String("public-base-url", "", "public base URL used in admin link responses, e.g. https://example.com")
 		wsPath            = flag.String("ws", "/ws", "WebSocket path")
 		publicIPArg       = flag.String("public-ip", "", "public server IP used for NAT 1:1 host candidates")
 		dbPathArg         = flag.String("rooms-db", "", "path to sqlite database for open rooms")
+		dbTableArg        = flag.String("db-table", envOrDefault("RELAY_DB_TABLE", "records"), "sqlite table name")
+		dbRoomColumnArg   = flag.String("db-room-column", envOrDefault("RELAY_DB_ROOM_COLUMN", "entry_id"), "sqlite room column name")
+		dbKeyColumnArg    = flag.String("db-key-column", envOrDefault("RELAY_DB_KEY_COLUMN", "entry_value"), "sqlite moderator key column name")
 		adminTokenArg     = flag.String("admin-token", "", "admin API token for /admin/* endpoints")
 		adminTokenFileArg = flag.String("admin-token-file", "", "path to file containing admin API token for /admin/* endpoints")
-		iceUDPPortMinArg  = flag.Uint("ice-udp-port-min", uint(envUint16OrDefault("SYMPOSIUM_ICE_UDP_PORT_MIN", 32768)), "minimum UDP port for WebRTC ICE media")
-		iceUDPPortMaxArg  = flag.Uint("ice-udp-port-max", uint(envUint16OrDefault("SYMPOSIUM_ICE_UDP_PORT_MAX", 60999)), "maximum UDP port for WebRTC ICE media")
+		tlsCertArg        = flag.String("tls-cert", "", "TLS certificate path for the public listener")
+		tlsKeyArg         = flag.String("tls-key", "", "TLS private key path for the public listener")
+		iceUDPPortMinArg  = flag.Uint("ice-udp-port-min", uint(envUint16OrDefault("RELAY_ICE_UDP_PORT_MIN", 32768)), "minimum UDP port for WebRTC ICE media")
+		iceUDPPortMaxArg  = flag.Uint("ice-udp-port-max", uint(envUint16OrDefault("RELAY_ICE_UDP_PORT_MAX", 60999)), "maximum UDP port for WebRTC ICE media")
 		includeLoop       = flag.Bool("loopback", false, "include loopback host candidates")
 		nat1to1CSV        = flag.String("nat1to1", "", "comma-separated external IPs for 1:1 NAT mapping")
 	)
@@ -3426,7 +3451,7 @@ func main() {
 
 	publicIP := strings.TrimSpace(*publicIPArg)
 	if publicIP == "" {
-		publicIP = strings.TrimSpace(os.Getenv("SYMPOSIUM_PUBLIC_IP"))
+		publicIP = strings.TrimSpace(os.Getenv("RELAY_PUBLIC_IP"))
 	}
 
 	iceURLs := []string(nil)
@@ -3438,17 +3463,17 @@ func main() {
 
 	dbPath := strings.TrimSpace(*dbPathArg)
 	if dbPath == "" {
-		dbPath = strings.TrimSpace(os.Getenv("SYMPOSIUM_OPEN_ROOMS_DB"))
+		dbPath = strings.TrimSpace(os.Getenv("RELAY_STORAGE_PATH"))
 	}
 	if dbPath == "" {
-		dbPath = "open_rooms.db"
+		dbPath = "records.db"
 	}
 
 	adminToken := readAdminTokenFromConfig(*adminTokenArg, *adminTokenFileArg)
 
 	publicBaseURL := strings.TrimSpace(*publicBaseURLArg)
 	if publicBaseURL == "" {
-		publicBaseURL = strings.TrimSpace(os.Getenv("SYMPOSIUM_PUBLIC_BASE_URL"))
+		publicBaseURL = strings.TrimSpace(os.Getenv("RELAY_PUBLIC_BASE_URL"))
 	}
 	publicBaseURL = strings.TrimRight(publicBaseURL, "/")
 
@@ -3469,12 +3494,12 @@ func main() {
 	log.Printf("ICE UDP port range: %d-%d/udp", iceUDPPortMin, iceUDPPortMax)
 	log.Printf("Admin API token configured: yes")
 
-	s := newServer(iceURLs, *includeLoop, natIPs, publicIP, dbPath, adminToken, publicBaseURL, iceUDPPortMin, iceUDPPortMax)
+	s := newServer(iceURLs, *includeLoop, natIPs, publicIP, dbPath, *dbTableArg, *dbRoomColumnArg, *dbKeyColumnArg, adminToken, publicBaseURL, *instanceNameArg, iceUDPPortMin, iceUDPPortMax)
 
 	publicMux := http.NewServeMux()
 	publicMux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-		fmt.Fprintf(w, "Symposium SFU is running. Connect via WebSocket at %s\n", *wsPath)
+		fmt.Fprintf(w, "Service is running. WebSocket endpoint: %s\n", *wsPath)
 	})
 	publicMux.HandleFunc(*wsPath, s.wsHandler)
 	publicMux.HandleFunc("/connect", s.connectRedirectHandler)
@@ -3511,8 +3536,20 @@ func main() {
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 
-	log.Printf("SFU listening on ws://%s%s", *addr, *wsPath)
-	if err := publicServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-		log.Fatalf("listen: %v", err)
+	tlsCert := strings.TrimSpace(*tlsCertArg)
+	tlsKey := strings.TrimSpace(*tlsKeyArg)
+	if (tlsCert == "") != (tlsKey == "") {
+		log.Fatalf("both --tls-cert and --tls-key are required when TLS is enabled")
+	}
+	var serveErr error
+	if tlsCert != "" {
+		log.Printf("public TLS listener active on %s", *addr)
+		serveErr = publicServer.ListenAndServeTLS(tlsCert, tlsKey)
+	} else {
+		log.Printf("public listener active on %s", *addr)
+		serveErr = publicServer.ListenAndServe()
+	}
+	if serveErr != nil && serveErr != http.ErrServerClosed {
+		log.Fatalf("listen: %v", serveErr)
 	}
 }

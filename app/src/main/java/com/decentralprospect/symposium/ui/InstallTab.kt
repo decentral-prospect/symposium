@@ -76,8 +76,8 @@ private data class PendingSshHostKeyTrust(
 fun InstallTab(
     expectedRelayVersion: String,
     refreshNonce: Int = 0,
-    onInstall: suspend (ip: String, login: String, password: String, expectedSshHostKeyPin: String?, logger: suspend (String) -> Unit) -> RemoteInstaller.InstallResult,
-    onRemoveRelay: suspend (ip: String, login: String, password: String, expectedSshHostKeyPin: String?, logger: suspend (String) -> Unit) -> RemoteInstaller.RelayRemovalResult,
+    onInstall: suspend (ip: String, login: String, password: String, expectedSshHostKeyPin: String?, deploymentProfile: DeploymentProfile?, logger: suspend (String) -> Unit) -> RemoteInstaller.InstallResult,
+    onRemoveRelay: suspend (ip: String, login: String, password: String, expectedSshHostKeyPin: String?, deploymentProfile: DeploymentProfile?, logger: suspend (String) -> Unit) -> RemoteInstaller.RelayRemovalResult,
     onObserveSshHostKeyPin: suspend (ip: String) -> String,
     onProbeServer: suspend (ip: String, login: String, password: String, expectedSshHostKeyPin: String?) -> RemoteInstaller.ProbeResult,
     onSetRoomOpenState: suspend (ip: String, httpsPort: Int?, relayTlsPin: String?, adminToken: String?, roomName: String, open: Boolean) -> RemoteInstaller.RoomAdminResult,
@@ -151,6 +151,10 @@ fun InstallTab(
             view != InstallView.GRID -> {
                 view = InstallView.GRID
                 selectedServerId = null
+                addIp = ""
+                addUser = ""
+                addPassword = ""
+                addError = null
             }
         }
     }
@@ -231,24 +235,148 @@ fun InstallTab(
         }
     }
 
-    fun refreshRelayVersion(server: InstallServer) {
+    suspend fun syncServerState(server: InstallServer, reportErrors: Boolean = false) {
         updateServer(server.id) { current ->
             current.copy(relayVersionState = RelayVersionState.UNKNOWN)
         }
 
-        installScope.launch {
-            markRelayVersion(
-                server.id,
-                runCatching {
-                    onFetchRelayVersion(
-                        server.ip,
-                        server.httpsPort,
-                        server.relayTlsPin,
-                        server.adminToken
+        val hasHttpsCredentials =
+            !server.relayTlsPin.isNullOrBlank() && !server.adminToken.isNullOrBlank()
+        val directVersionResult = if (hasHttpsCredentials) {
+            runCatching {
+                onFetchRelayVersion(
+                    server.ip,
+                    server.httpsPort,
+                    server.relayTlsPin,
+                    server.adminToken
+                )
+            }
+        } else {
+            Result.failure(IllegalStateException("Relay credentials are not synchronized yet"))
+        }
+
+        if (directVersionResult.isSuccess) {
+            markRelayVersion(server.id, directVersionResult)
+            runCatching {
+                onFetchOpenRooms(server.ip, server.httpsPort, server.relayTlsPin, server.adminToken)
+            }.onSuccess { result ->
+                updateServer(server.id) { current ->
+                    current.copy(
+                        openRooms = result.openRooms,
+                        sshHostKeyPin = current.sshHostKeyPin ?: result.observedSshHostKeyPin,
+                        relayTlsPin = result.relayInfo?.pin ?: current.relayTlsPin,
+                        httpsPort = result.relayInfo?.httpsPort ?: current.httpsPort,
+                        adminToken = result.relayInfo?.adminToken ?: current.adminToken
                     )
                 }
+                if (reportErrors) installError = null
+            }.onFailure {
+                if (reportErrors) installError = it.message ?: "Не удалось обновить открытые комнаты"
+            }
+            return
+        }
+
+        val probeResult = runCatching {
+            onProbeServer(server.ip, server.username, server.password, server.sshHostKeyPin)
+        }
+        val probed = probeResult.getOrElse {
+            updateServer(server.id) { current ->
+                current.copy(
+                    relayVersionState = if (current.installed) {
+                        RelayVersionState.UNKNOWN
+                    } else {
+                        RelayVersionState.NOT_INSTALLED
+                    }
+                )
+            }
+            if (reportErrors) {
+                installError = it.message ?: "Не удалось проверить сервер по SSH"
+            }
+            return
+        }
+
+        if (probed.installationInProgress) {
+            updateServer(server.id) { current ->
+                current.copy(
+                    relayVersionState = RelayVersionState.UNKNOWN,
+                    sshHostKeyPin = current.sshHostKeyPin ?: probed.observedSshHostKeyPin
+                )
+            }
+            return
+        }
+
+        if (!probed.installed) {
+            updateServer(server.id) { current ->
+                if (current.installed) {
+                    current.copy(
+                        installed = false,
+                        relayVersionState = RelayVersionState.UNKNOWN,
+                        sshHostKeyPin = current.sshHostKeyPin ?: probed.observedSshHostKeyPin
+                    )
+                } else {
+                    current.copy(
+                        installed = false,
+                        openRooms = emptyList(),
+                        relayTlsPin = null,
+                        httpsPort = null,
+                        adminToken = null,
+                        deploymentProfile = null,
+                        relayVersion = null,
+                        relayVersionState = RelayVersionState.NOT_INSTALLED,
+                        sshHostKeyPin = current.sshHostKeyPin ?: probed.observedSshHostKeyPin
+                    )
+                }
+            }
+            if (reportErrors) installError = null
+            return
+        }
+
+        val relayInfo = probed.relayInfo
+        updateServer(server.id) { current ->
+            current.copy(
+                installed = true,
+                openRooms = probed.openRooms,
+                sshHostKeyPin = current.sshHostKeyPin ?: probed.observedSshHostKeyPin,
+                relayTlsPin = relayInfo?.pin ?: current.relayTlsPin,
+                httpsPort = relayInfo?.httpsPort ?: current.httpsPort,
+                adminToken = relayInfo?.adminToken ?: current.adminToken,
+                deploymentProfile = probed.deploymentProfile ?: current.deploymentProfile,
+                relayVersionState = RelayVersionState.UNKNOWN
             )
         }
+
+        val discoveredPin = relayInfo?.pin ?: server.relayTlsPin
+        val discoveredPort = relayInfo?.httpsPort ?: server.httpsPort
+        val discoveredToken = relayInfo?.adminToken ?: server.adminToken
+        if (discoveredPin.isNullOrBlank() || discoveredToken.isNullOrBlank()) {
+            if (reportErrors) installError = "SymposiumRelay найден, но его параметры не удалось синхронизировать"
+            return
+        }
+
+        val discoveredVersionResult = runCatching {
+            onFetchRelayVersion(server.ip, discoveredPort, discoveredPin, discoveredToken)
+        }
+        if (discoveredVersionResult.isSuccess) {
+            markRelayVersion(server.id, discoveredVersionResult)
+        }
+
+        runCatching {
+            onFetchOpenRooms(server.ip, discoveredPort, discoveredPin, discoveredToken)
+        }.onSuccess { result ->
+            updateServer(server.id) { current ->
+                current.copy(
+                    openRooms = result.openRooms,
+                    relayTlsPin = result.relayInfo?.pin ?: current.relayTlsPin,
+                    httpsPort = result.relayInfo?.httpsPort ?: current.httpsPort,
+                    adminToken = result.relayInfo?.adminToken ?: current.adminToken
+                )
+            }
+        }
+        if (reportErrors) installError = null
+    }
+
+    fun refreshRelayVersion(server: InstallServer) {
+        installScope.launch { syncServerState(server) }
     }
 
     LaunchedEffect(serversLoaded, refreshNonce) {
@@ -256,6 +384,22 @@ fun InstallTab(
 
         servers.toList().forEach { server ->
             refreshRelayVersion(server)
+        }
+    }
+
+    LaunchedEffect(serversLoaded) {
+        if (!serversLoaded) return@LaunchedEffect
+        while (true) {
+            delay(20_000)
+            val unsynchronized = servers.toList().filter {
+                !it.installed ||
+                    it.relayTlsPin.isNullOrBlank() ||
+                    it.adminToken.isNullOrBlank() ||
+                    it.relayVersionState == RelayVersionState.UNKNOWN
+            }
+            unsynchronized.forEach { server ->
+                syncServerState(server)
+            }
         }
     }
 
@@ -281,29 +425,7 @@ fun InstallTab(
         roomActionLoading = false
 
         val server = selectedServer ?: return@LaunchedEffect
-
-        val versionResult = runCatching {
-            onFetchRelayVersion(server.ip, server.httpsPort, server.relayTlsPin, server.adminToken)
-        }
-        markRelayVersion(server.id, versionResult)
-        if (versionResult.isFailure) return@LaunchedEffect
-
-        val result = runCatching {
-            onFetchOpenRooms(server.ip, server.httpsPort, server.relayTlsPin, server.adminToken)
-        }
-        result.onSuccess { r ->
-            updateServer(server.id) { current ->
-                current.copy(
-                    openRooms = r.openRooms,
-                    sshHostKeyPin = current.sshHostKeyPin ?: r.observedSshHostKeyPin,
-                    relayTlsPin = r.relayInfo?.pin ?: current.relayTlsPin,
-                    httpsPort = r.relayInfo?.httpsPort ?: current.httpsPort,
-                    adminToken = r.relayInfo?.adminToken ?: current.adminToken
-                )
-            }
-        }.onFailure {
-            installError = it.message ?: "Не удалось обновить открытые комнаты"
-        }
+        syncServerState(server, reportErrors = true)
     }
 
     fun finishAddServerAfterHostKeyTrust(trust: PendingSshHostKeyTrust) {
@@ -337,6 +459,7 @@ fun InstallTab(
                 httpsPort = probed.relayInfo?.httpsPort,
                 relayTlsPin = probed.relayInfo?.pin,
                 adminToken = probed.relayInfo?.adminToken,
+                deploymentProfile = probed.deploymentProfile,
                 openRooms = probed.openRooms,
                 relayVersionState = if (probed.installed) RelayVersionState.UNKNOWN else RelayVersionState.NOT_INSTALLED
             )
@@ -415,7 +538,8 @@ fun InstallTab(
                     server.ip.trim(),
                     server.username.trim(),
                     server.password,
-                    server.sshHostKeyPin
+                    server.sshHostKeyPin,
+                    server.deploymentProfile
                 ) { line ->
                     withContext(Dispatchers.Main) { installLogs.add(line) }
                 }
@@ -450,7 +574,8 @@ fun InstallTab(
                     relayTlsPin = relayPin ?: current.relayTlsPin,
                     httpsPort = httpsPort ?: current.httpsPort,
                     adminToken = adminToken ?: current.adminToken,
-                    openRooms = current.openRooms,
+                    deploymentProfile = r.deploymentProfile ?: current.deploymentProfile,
+                    openRooms = r.openRooms,
                     relayVersion = expectedRelayVersion,
                     relayVersionState = RelayVersionState.CURRENT
                 )
@@ -472,7 +597,8 @@ fun InstallTab(
                     server.ip.trim(),
                     server.username.trim(),
                     server.password,
-                    server.sshHostKeyPin
+                    server.sshHostKeyPin,
+                    server.deploymentProfile
                 ) { line ->
                     withContext(Dispatchers.Main) { installLogs.add(line) }
                 }
@@ -492,6 +618,7 @@ fun InstallTab(
                     relayTlsPin = null,
                     httpsPort = null,
                     adminToken = null,
+                    deploymentProfile = null,
                     relayVersion = null,
                     relayVersionState = RelayVersionState.NOT_INSTALLED,
                     sshHostKeyPin = current.sshHostKeyPin ?: r.observedSshHostKeyPin
@@ -523,7 +650,8 @@ fun InstallTab(
                     server.ip.trim(),
                     server.username.trim(),
                     server.password,
-                    server.sshHostKeyPin
+                    server.sshHostKeyPin,
+                    server.deploymentProfile
                 ) { line ->
                     withContext(Dispatchers.Main) { installLogs.add(line) }
                 }
@@ -543,7 +671,8 @@ fun InstallTab(
                     server.ip.trim(),
                     server.username.trim(),
                     server.password,
-                    sshPin
+                    sshPin,
+                    server.deploymentProfile
                 ) { line ->
                     withContext(Dispatchers.Main) { installLogs.add(line) }
                 }
@@ -572,7 +701,8 @@ fun InstallTab(
                     relayTlsPin = installed.relayInfo?.pin ?: current.relayTlsPin,
                     httpsPort = installed.relayInfo?.httpsPort ?: current.httpsPort,
                     adminToken = installed.relayInfo?.adminToken ?: current.adminToken,
-                    openRooms = current.openRooms,
+                    deploymentProfile = installed.deploymentProfile ?: current.deploymentProfile,
+                    openRooms = installed.openRooms,
                     relayVersion = expectedRelayVersion,
                     relayVersionState = RelayVersionState.CURRENT
                 )
@@ -646,21 +776,21 @@ fun InstallTab(
     fun guestQrLink(server: InstallServer, room: OpenRoomInfo): String? {
         val pin = server.relayTlsPin?.trim()
         if (pin.isNullOrBlank()) return null
-        return buildConnectDeepLink(server.ip, room.name, pin)
+        return buildConnectDeepLink(server.ip, server.httpsPort, room.name, pin)
     }
 
     fun moderatorLink(server: InstallServer, room: OpenRoomInfo): String? {
         val pin = server.relayTlsPin?.trim()
         val modKey = room.moderatorKey.trim()
         if (pin.isNullOrBlank() || modKey.isBlank()) return null
-        return buildConnectDeepLink(server.ip, room.name, pin, moderatorKey = modKey)
+        return buildConnectDeepLink(server.ip, server.httpsPort, room.name, pin, moderatorKey = modKey)
     }
 
     fun moderatorQrLink(server: InstallServer, room: OpenRoomInfo): String? {
         val pin = server.relayTlsPin?.trim()
         val modKey = room.moderatorKey.trim()
         if (pin.isNullOrBlank() || modKey.isBlank()) return null
-        return buildConnectDeepLink(server.ip, room.name, pin, moderatorKey = modKey)
+        return buildConnectDeepLink(server.ip, server.httpsPort, room.name, pin, moderatorKey = modKey)
     }
 
     fun missingPinError() {
@@ -907,6 +1037,9 @@ fun InstallTab(
                                 label = "Назад",
                                 onClick = {
                                     view = InstallView.GRID
+                                    addIp = ""
+                                    addUser = ""
+                                    addPassword = ""
                                     addError = null
                                 },
                                 modifier = Modifier.weight(1f),
