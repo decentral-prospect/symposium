@@ -147,8 +147,19 @@ internal fun parseConnectLink(raw: String): ConnectLinkPayload? {
     val moderatorKey = if (isDeepLink) uri.getQueryParameter("modKey")?.trim().orEmpty() else ""
 
     val explicitIp = uri.getQueryParameter("ip")?.trim().orEmpty()
-    val hostIp = if (isHttpRedirect) uri.host?.trim().orEmpty() else ""
-    val ip = explicitIp.ifBlank { hostIp }
+    val httpHost = if (isHttpRedirect) uri.host?.trim().orEmpty() else ""
+    val httpPort = if (isHttpRedirect) uri.port else -1
+    val httpAuthority = when {
+        httpHost.isBlank() -> ""
+        httpPort > 0 && httpPort != DEFAULT_RELAY_HTTP_PORT -> "$httpHost:$httpPort"
+        else -> httpHost
+    }
+    val ip = when {
+        explicitIp.isBlank() -> httpAuthority
+        isHttpRedirect && httpPort > 0 && httpPort != DEFAULT_RELAY_HTTP_PORT &&
+            explicitIp.substringAfterLast(":", "").toIntOrNull() == null -> "$explicitIp:$httpPort"
+        else -> explicitIp
+    }
 
     if (ip.isBlank() || room.isBlank() || tlsPin.isBlank()) return null
 
@@ -164,15 +175,18 @@ internal fun parseConnectLink(raw: String): ConnectLinkPayload? {
 
 internal fun buildConnectDeepLink(
     ip: String,
+    httpsPort: Int?,
     room: String,
     relayTlsPin: String?,
     moderatorKey: String? = null
 ): String {
     val pin = relayTlsPin?.trim().orEmpty()
+    val port = httpsPort ?: DEFAULT_RELAY_HTTP_PORT
+    val endpoint = if (port == DEFAULT_RELAY_HTTP_PORT) ip.trim() else "${ip.trim()}:$port"
     val builder = Uri.Builder()
         .scheme("symposium")
         .authority("connect")
-        .appendQueryParameter("ip", ip.trim())
+        .appendQueryParameter("ip", endpoint)
         .appendQueryParameter("room", room.trim())
         .appendQueryParameter("tlsPin", pin)
 
@@ -199,7 +213,7 @@ internal fun buildConnectHttpRedirectLink(
         .scheme("https")
         .encodedAuthority(authority)
         .path("connect")
-        .appendQueryParameter("ip", ip.trim())
+        .appendQueryParameter("ip", authority)
         .appendQueryParameter("room", room.trim())
         .appendQueryParameter("tlsPin", pin)
 
@@ -323,6 +337,7 @@ data class InstallServer(
     val httpsPort: Int? = null,
     val relayTlsPin: String? = null,
     val adminToken: String? = null,
+    val deploymentProfile: DeploymentProfile? = null,
     val openRooms: List<OpenRoomInfo> = emptyList(),
     val relayVersion: String? = null,
     val relayVersionState: RelayVersionState = RelayVersionState.UNKNOWN

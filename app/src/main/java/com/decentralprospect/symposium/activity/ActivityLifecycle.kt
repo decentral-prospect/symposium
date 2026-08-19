@@ -101,21 +101,23 @@ internal fun MainActivity.initializeMainActivityAfterCreate() {
                     onSetMicAudioEnabled = { enabled ->
                         callRuntimeState?.sendSelfMediaState(audioEnabled = enabled)
                     },
-                    onInstall = { ip, login, pass, expectedSshHostKeyPin, logger ->
+                    onInstall = { ip, login, pass, expectedSshHostKeyPin, deploymentProfile, logger ->
                         performRelayInstallationWithTelemetry(
                             serverIp = ip,
                             login = login,
                             password = pass,
                             expectedSshHostKeyPin = expectedSshHostKeyPin,
+                            existingProfile = deploymentProfile,
                             logger = logger
                         )
                     },
-                    onRemoveRelay = { ip, login, pass, expectedSshHostKeyPin, logger ->
+                    onRemoveRelay = { ip, login, pass, expectedSshHostKeyPin, deploymentProfile, logger ->
                         remoteInstaller.removeRelayFromServer(
                             serverIp = ip,
                             login = login,
                             password = pass,
                             expectedSshHostKeyPin = expectedSshHostKeyPin,
+                            deploymentProfile = deploymentProfile,
                             logger = logger
                         )
                     },

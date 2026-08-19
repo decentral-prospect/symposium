@@ -64,6 +64,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.util.UUID
@@ -97,8 +98,8 @@ internal fun AppScreen(
     onMutePeer: (String) -> Unit = {},
     onUnmutePeer: (String) -> Unit = {},
     onSetMuteAll: (Boolean) -> Unit = {},
-    onInstall: suspend (ip: String, login: String, password: String, expectedSshHostKeyPin: String?, logger: suspend (String) -> Unit) -> RemoteInstaller.InstallResult,
-    onRemoveRelay: suspend (ip: String, login: String, password: String, expectedSshHostKeyPin: String?, logger: suspend (String) -> Unit) -> RemoteInstaller.RelayRemovalResult,
+    onInstall: suspend (ip: String, login: String, password: String, expectedSshHostKeyPin: String?, deploymentProfile: DeploymentProfile?, logger: suspend (String) -> Unit) -> RemoteInstaller.InstallResult,
+    onRemoveRelay: suspend (ip: String, login: String, password: String, expectedSshHostKeyPin: String?, deploymentProfile: DeploymentProfile?, logger: suspend (String) -> Unit) -> RemoteInstaller.RelayRemovalResult,
     onObserveSshHostKeyPin: suspend (ip: String) -> String,
     onProbeServer: suspend (ip: String, login: String, password: String, expectedSshHostKeyPin: String?) -> RemoteInstaller.ProbeResult,
     onSetRoomOpenState: suspend (ip: String, httpsPort: Int?, relayTlsPin: String?, adminToken: String?, roomName: String, open: Boolean) -> RemoteInstaller.RoomAdminResult,
@@ -248,38 +249,39 @@ internal fun AppScreen(
         homeAddLoading = false
     }
 
-    fun refreshHomeServer(server: InstallServer) {
-        if (!server.installed) return
-        homeScope.launch {
-            val versionResult = runCatching {
+    fun clearConnectForm() {
+        connectLink = ""
+        usernameInput = ""
+    }
+
+    suspend fun syncHomeServer(server: InstallServer) {
+        updateHomeServer(server.id) { current ->
+            current.copy(relayVersionState = RelayVersionState.UNKNOWN)
+        }
+
+        val hasHttpsCredentials =
+            !server.relayTlsPin.isNullOrBlank() && !server.adminToken.isNullOrBlank()
+        val directVersionResult = if (hasHttpsCredentials) {
+            runCatching {
                 onFetchRelayVersion(server.ip, server.httpsPort, server.relayTlsPin, server.adminToken)
             }
+        } else {
+            Result.failure(IllegalStateException("Relay credentials are not synchronized yet"))
+        }
 
-            versionResult.onSuccess { info ->
-                updateHomeServer(server.id) { current ->
-                    current.copy(
-                        installed = true,
-                        relayVersion = info.version.trim(),
-                        relayVersionState = homeRelayVersionStateFor(info.version)
-                    )
-                }
-            }.onFailure {
-                updateHomeServer(server.id) { current ->
-                    current.copy(
-                        installed = false,
-                        openRooms = emptyList(),
-                        relayVersion = null,
-                        relayVersionState = RelayVersionState.NOT_INSTALLED
-                    )
-                }
-                return@launch
+        if (directVersionResult.isSuccess) {
+            val version = directVersionResult.getOrThrow().version.trim()
+            updateHomeServer(server.id) { current ->
+                current.copy(
+                    installed = true,
+                    relayVersion = version,
+                    relayVersionState = homeRelayVersionStateFor(version)
+                )
             }
 
-            val roomsResult = runCatching {
+            runCatching {
                 onFetchOpenRooms(server.ip, server.httpsPort, server.relayTlsPin, server.adminToken)
-            }
-
-            roomsResult.onSuccess { result ->
+            }.onSuccess { result ->
                 updateHomeServer(server.id) { current ->
                     current.copy(
                         openRooms = result.openRooms,
@@ -290,59 +292,124 @@ internal fun AppScreen(
                     )
                 }
             }
+            return
+        }
+
+        val probeResult = runCatching {
+            onProbeServer(server.ip, server.username, server.password, server.sshHostKeyPin)
+        }
+        val probed = probeResult.getOrElse {
+            updateHomeServer(server.id) { current ->
+                current.copy(
+                    relayVersionState = if (current.installed) {
+                        RelayVersionState.UNKNOWN
+                    } else {
+                        RelayVersionState.NOT_INSTALLED
+                    }
+                )
+            }
+            return
+        }
+
+        if (probed.installationInProgress) {
+            updateHomeServer(server.id) { current ->
+                current.copy(
+                    relayVersionState = RelayVersionState.UNKNOWN,
+                    sshHostKeyPin = current.sshHostKeyPin ?: probed.observedSshHostKeyPin
+                )
+            }
+            return
+        }
+
+        if (!probed.installed) {
+            updateHomeServer(server.id) { current ->
+                if (current.installed) {
+                    current.copy(
+                        installed = false,
+                        relayVersionState = RelayVersionState.UNKNOWN,
+                        sshHostKeyPin = current.sshHostKeyPin ?: probed.observedSshHostKeyPin
+                    )
+                } else {
+                    current.copy(
+                        installed = false,
+                        openRooms = emptyList(),
+                        relayTlsPin = null,
+                        httpsPort = null,
+                        adminToken = null,
+                        deploymentProfile = null,
+                        relayVersion = null,
+                        relayVersionState = RelayVersionState.NOT_INSTALLED,
+                        sshHostKeyPin = current.sshHostKeyPin ?: probed.observedSshHostKeyPin
+                    )
+                }
+            }
+            return
+        }
+
+        val relayInfo = probed.relayInfo
+        updateHomeServer(server.id) { current ->
+            current.copy(
+                installed = true,
+                openRooms = probed.openRooms,
+                sshHostKeyPin = current.sshHostKeyPin ?: probed.observedSshHostKeyPin,
+                relayTlsPin = relayInfo?.pin ?: current.relayTlsPin,
+                httpsPort = relayInfo?.httpsPort ?: current.httpsPort,
+                adminToken = relayInfo?.adminToken ?: current.adminToken,
+                deploymentProfile = probed.deploymentProfile ?: current.deploymentProfile,
+                relayVersionState = RelayVersionState.UNKNOWN
+            )
+        }
+
+        val discoveredPin = relayInfo?.pin ?: server.relayTlsPin
+        val discoveredPort = relayInfo?.httpsPort ?: server.httpsPort
+        val discoveredToken = relayInfo?.adminToken ?: server.adminToken
+        if (discoveredPin.isNullOrBlank() || discoveredToken.isNullOrBlank()) return
+
+        runCatching {
+            onFetchRelayVersion(server.ip, discoveredPort, discoveredPin, discoveredToken)
+        }.onSuccess { info ->
+            updateHomeServer(server.id) { current ->
+                current.copy(
+                    installed = true,
+                    relayVersion = info.version.trim(),
+                    relayVersionState = homeRelayVersionStateFor(info.version)
+                )
+            }
+        }
+
+        runCatching {
+            onFetchOpenRooms(server.ip, discoveredPort, discoveredPin, discoveredToken)
+        }.onSuccess { result ->
+            updateHomeServer(server.id) { current ->
+                current.copy(
+                    openRooms = result.openRooms,
+                    relayTlsPin = result.relayInfo?.pin ?: current.relayTlsPin,
+                    httpsPort = result.relayInfo?.httpsPort ?: current.httpsPort,
+                    adminToken = result.relayInfo?.adminToken ?: current.adminToken
+                )
+            }
         }
     }
 
+    fun refreshHomeServer(server: InstallServer) {
+        homeScope.launch { syncHomeServer(server) }
+    }
+
     fun refreshHomeServers() {
+        if (homeServersRefreshing) return
         homeServersRefreshing = true
         loadHomeServersFromStore()
         val snapshot = homeServers.toList()
-        if (snapshot.none { it.installed }) {
+        if (snapshot.isEmpty()) {
             homeServersRefreshing = false
             return
         }
         homeScope.launch {
-            snapshot.filter { it.installed }.forEach { server ->
-                val versionResult = runCatching {
-                    onFetchRelayVersion(server.ip, server.httpsPort, server.relayTlsPin, server.adminToken)
-                }
-                if (versionResult.isFailure) {
-                    updateHomeServer(server.id) { current ->
-                        current.copy(
-                            installed = false,
-                            openRooms = emptyList(),
-                            relayVersion = null,
-                            relayVersionState = RelayVersionState.NOT_INSTALLED
-                        )
-                    }
-                    return@forEach
-                }
-
-                val version = versionResult.getOrNull()?.version.orEmpty()
-                updateHomeServer(server.id) { current ->
-                    current.copy(
-                        installed = true,
-                        relayVersion = version,
-                        relayVersionState = homeRelayVersionStateFor(version)
-                    )
-                }
-
-                val roomsResult = runCatching {
-                    onFetchOpenRooms(server.ip, server.httpsPort, server.relayTlsPin, server.adminToken)
-                }
-                roomsResult.onSuccess { result ->
-                    updateHomeServer(server.id) { current ->
-                        current.copy(
-                            openRooms = result.openRooms,
-                            sshHostKeyPin = current.sshHostKeyPin ?: result.observedSshHostKeyPin,
-                            relayTlsPin = result.relayInfo?.pin ?: current.relayTlsPin,
-                            httpsPort = result.relayInfo?.httpsPort ?: current.httpsPort,
-                            adminToken = result.relayInfo?.adminToken ?: current.adminToken
-                        )
-                    }
-                }
+            try {
+                snapshot.forEach { server -> syncHomeServer(server) }
+            } finally {
+                homeServersRefreshing = false
             }
-            homeServersRefreshing = false
         }
     }
 
@@ -414,6 +481,7 @@ internal fun AppScreen(
                 httpsPort = probed.relayInfo?.httpsPort,
                 relayTlsPin = probed.relayInfo?.pin,
                 adminToken = probed.relayInfo?.adminToken,
+                deploymentProfile = probed.deploymentProfile,
                 openRooms = probed.openRooms,
                 relayVersionState = if (probed.installed) RelayVersionState.UNKNOWN else RelayVersionState.NOT_INSTALLED
             )
@@ -443,7 +511,8 @@ internal fun AppScreen(
                     server.ip.trim(),
                     server.username.trim(),
                     server.password,
-                    server.sshHostKeyPin
+                    server.sshHostKeyPin,
+                    server.deploymentProfile
                 ) { line ->
                     withContext(Dispatchers.Main) { homeInstallLogs.add(line) }
                 }
@@ -471,6 +540,8 @@ internal fun AppScreen(
                     relayTlsPin = finalRelayPin ?: current.relayTlsPin,
                     httpsPort = installed.relayInfo?.httpsPort ?: current.httpsPort,
                     adminToken = finalAdminToken ?: current.adminToken,
+                    deploymentProfile = installed.deploymentProfile ?: current.deploymentProfile,
+                    openRooms = installed.openRooms,
                     relayVersion = expectedRelayVersion,
                     relayVersionState = RelayVersionState.CURRENT
                 )
@@ -580,14 +651,14 @@ internal fun AppScreen(
     fun homeGuestQrLink(server: InstallServer, room: OpenRoomInfo): String? {
         val pin = server.relayTlsPin?.trim()
         if (pin.isNullOrBlank()) return null
-        return buildConnectDeepLink(server.ip, room.name, pin)
+        return buildConnectDeepLink(server.ip, server.httpsPort, room.name, pin)
     }
 
     fun homeModeratorLink(server: InstallServer, room: OpenRoomInfo): String? {
         val pin = server.relayTlsPin?.trim()
         val modKey = room.moderatorKey.trim()
         if (pin.isNullOrBlank() || modKey.isBlank()) return null
-        return buildConnectDeepLink(server.ip, room.name, pin, moderatorKey = modKey)
+        return buildConnectDeepLink(server.ip, server.httpsPort, room.name, pin, moderatorKey = modKey)
     }
 
     fun showMissingLinkDataError() {
@@ -801,12 +872,28 @@ internal fun AppScreen(
     LaunchedEffect(uiStateBinder) { onRequestBind(uiStateBinder) }
 
     LaunchedEffect(Unit) {
-        loadHomeServersFromStore()
+        refreshHomeServers()
     }
 
     LaunchedEffect(currentScreen) {
         if (currentScreen == RootScreen.HOME) {
-            loadHomeServersFromStore()
+            refreshHomeServers()
+        }
+    }
+
+    LaunchedEffect(homeServersLoaded) {
+        if (!homeServersLoaded) return@LaunchedEffect
+        while (true) {
+            delay(20_000)
+            val needsDiscovery = homeServers.any {
+                !it.installed ||
+                    it.relayTlsPin.isNullOrBlank() ||
+                    it.adminToken.isNullOrBlank() ||
+                    it.relayVersionState == RelayVersionState.UNKNOWN
+            }
+            if (currentScreen == RootScreen.HOME && needsDiscovery && !homeServersRefreshing) {
+                refreshHomeServers()
+            }
         }
     }
 
@@ -833,14 +920,19 @@ internal fun AppScreen(
                 onUsernameChange = { usernameInput = it },
                 parsed = parsedConnectLink,
                 reconnectMode = reconnectMode,
-                onDismiss = { showConnectDialog = false },
+                onDismiss = {
+                    showConnectDialog = false
+                    clearConnectForm()
+                },
                 onConnect = {
                     parsedConnectLink?.let { payload ->
+                        val finalUsername = usernameInput.trim().ifBlank { payload.username.trim() }
                         showConnectDialog = false
+                        clearConnectForm()
                         onConnect(
                             payload.ip,
                             payload.room,
-                            usernameInput.trim().ifBlank { payload.username.trim() },
+                            finalUsername,
                             payload.tlsPin,
                             payload.moderatorKey
                         )
@@ -1116,10 +1208,6 @@ internal fun AppScreen(
                             lobbyWaiting = false
                             onDisconnect()
                         }
-                    )
-                    ReconnectOverlay(
-                        visible = reconnectMode,
-                        onCancel = onCancelReconnect
                     )
                 }
                 return@Scaffold

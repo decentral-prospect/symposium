@@ -47,6 +47,88 @@ data class OpenRoomInfo(
     val moderatorKey: String = ""
 )
 
+data class DeploymentProfile(
+    val appDir: String,
+    val serviceName: String,
+    val instanceName: String,
+    val serviceUser: String,
+    val serviceGroup: String,
+    val binaryDirName: String,
+    val stateDirName: String,
+    val identityDirName: String,
+    val binaryName: String,
+    val databaseName: String,
+    val tokenName: String,
+    val certificateName: String,
+    val privateKeyName: String,
+    val dbTable: String,
+    val dbRoomColumn: String,
+    val dbKeyColumn: String,
+    val publicPort: Int,
+    val adminPort: Int,
+    val iceUdpPortMin: Int,
+    val iceUdpPortMax: Int,
+    val firewallTag: String,
+    val stagingDir: String,
+    val adminToken: String
+)
+
+private fun deploymentProfileToJson(profile: DeploymentProfile): JSONObject = JSONObject()
+    .put("appDir", profile.appDir)
+    .put("serviceName", profile.serviceName)
+    .put("instanceName", profile.instanceName)
+    .put("serviceUser", profile.serviceUser)
+    .put("serviceGroup", profile.serviceGroup)
+    .put("binaryDirName", profile.binaryDirName)
+    .put("stateDirName", profile.stateDirName)
+    .put("identityDirName", profile.identityDirName)
+    .put("binaryName", profile.binaryName)
+    .put("databaseName", profile.databaseName)
+    .put("tokenName", profile.tokenName)
+    .put("certificateName", profile.certificateName)
+    .put("privateKeyName", profile.privateKeyName)
+    .put("dbTable", profile.dbTable)
+    .put("dbRoomColumn", profile.dbRoomColumn)
+    .put("dbKeyColumn", profile.dbKeyColumn)
+    .put("publicPort", profile.publicPort)
+    .put("adminPort", profile.adminPort)
+    .put("iceUdpPortMin", profile.iceUdpPortMin)
+    .put("iceUdpPortMax", profile.iceUdpPortMax)
+    .put("firewallTag", profile.firewallTag)
+    .put("stagingDir", profile.stagingDir)
+    .put("adminToken", profile.adminToken)
+
+private fun deploymentProfileFromJson(value: JSONObject?): DeploymentProfile? {
+    if (value == null) return null
+    return runCatching {
+        DeploymentProfile(
+            appDir = value.getString("appDir"),
+            serviceName = value.getString("serviceName"),
+            instanceName = value.optString("instanceName").ifBlank { value.getString("serviceName") },
+            serviceUser = value.getString("serviceUser"),
+            serviceGroup = value.getString("serviceGroup"),
+            binaryDirName = value.getString("binaryDirName"),
+            stateDirName = value.getString("stateDirName"),
+            identityDirName = value.getString("identityDirName"),
+            binaryName = value.getString("binaryName"),
+            databaseName = value.getString("databaseName"),
+            tokenName = value.getString("tokenName"),
+            certificateName = value.getString("certificateName"),
+            privateKeyName = value.getString("privateKeyName"),
+            dbTable = value.getString("dbTable"),
+            dbRoomColumn = value.getString("dbRoomColumn"),
+            dbKeyColumn = value.getString("dbKeyColumn"),
+            publicPort = value.getInt("publicPort"),
+            adminPort = value.getInt("adminPort"),
+            iceUdpPortMin = value.getInt("iceUdpPortMin"),
+            iceUdpPortMax = value.getInt("iceUdpPortMax"),
+            firewallTag = value.getString("firewallTag"),
+            stagingDir = value.getString("stagingDir"),
+            adminToken = value.getString("adminToken")
+        )
+    }.getOrNull()
+}
+
 private fun parseOpenRoomsJson(raw: String): List<OpenRoomInfo> {
     val trimmed = raw.trim()
     if (trimmed.isBlank()) return emptyList()
@@ -119,7 +201,9 @@ class RemoteInstaller(private val appContext: Context) {
         val installed: Boolean,
         val openRooms: List<OpenRoomInfo>,
         val relayInfo: RelayInfo? = null,
-        val observedSshHostKeyPin: String? = null
+        val deploymentProfile: DeploymentProfile? = null,
+        val observedSshHostKeyPin: String? = null,
+        val installationInProgress: Boolean = false
     )
 
     data class RoomAdminResult(
@@ -147,7 +231,8 @@ class RemoteInstaller(private val appContext: Context) {
     data class InstallResult(
         val success: Boolean,
         val relayInfo: RelayInfo? = null,
-        val relayInfoRaw: String? = null,
+        val deploymentProfile: DeploymentProfile? = null,
+        val openRooms: List<OpenRoomInfo> = emptyList(),
         val exitStatus: Int = -1,
         val observedSshHostKeyPin: String? = null
     )
@@ -157,11 +242,14 @@ class RemoteInstaller(private val appContext: Context) {
         login: String,
         password: String,
         expectedSshHostKeyPin: String?,
+        existingProfile: DeploymentProfile? = null,
         logger: suspend (String) -> Unit
     ): InstallResult = withContext(Dispatchers.IO) {
         requireKnownSshHostKeyPin(expectedSshHostKeyPin)
 
         var observedHostKeyPin: String? = null
+        var selectedProfile: DeploymentProfile? = null
+        var installMarkerCreated = false
 
         try {
             logger("Подключение к серверу…")
@@ -176,20 +264,101 @@ class RemoteInstaller(private val appContext: Context) {
 
                 logger("SSH готов")
 
+                val discovered = discoverRandomizedDeployments(
+                    ssh = ssh,
+                    login = login,
+                    password = password,
+                    serverIp = serverIp
+                )
+                val currentDeployment = discovered.firstOrNull {
+                    it.installed && it.relayInfo != null
+                }
+                val staleDeployments = if (currentDeployment == null) {
+                    discovered
+                } else {
+                    discovered.filterNot {
+                        it.profile.serviceName == currentDeployment.profile.serviceName
+                    }
+                }
+                val legacyDeploymentPresent = hasLegacyDeployment(
+                    ssh = ssh,
+                    login = login,
+                    password = password
+                )
+
+                if (staleDeployments.isNotEmpty() || legacyDeploymentPresent) {
+                    logger("Найдены старые или неработающие установки; удаление…")
+                    staleDeployments.forEach { deployment ->
+                        val removal = runRootOrSudo(
+                            ssh = ssh,
+                            login = login,
+                            password = password,
+                            command = buildRemovalScript(deployment.profile)
+                        )
+                        check(removal.exitStatus == 0) {
+                            "Не удалось удалить старый сервис ${deployment.profile.serviceName}"
+                        }
+                    }
+                    if (legacyDeploymentPresent) {
+                        val removal = runRootOrSudo(
+                            ssh = ssh,
+                            login = login,
+                            password = password,
+                            command = LEGACY_REMOVAL_SCRIPT
+                        )
+                        check(removal.exitStatus == 0) {
+                            "Не удалось удалить старую установку"
+                        }
+                    }
+                    logger("Старые установки удалены")
+                }
+
+                if (currentDeployment != null) {
+                    logger("Работающая установка найдена; конфигурация синхронизирована")
+                    return@withContext InstallResult(
+                        success = true,
+                        relayInfo = currentDeployment.relayInfo,
+                        deploymentProfile = currentDeployment.profile,
+                        openRooms = currentDeployment.openRooms,
+                        exitStatus = 0,
+                        observedSshHostKeyPin = observedHostKeyPin
+                    )
+                }
+
+                val removedExistingInstallation =
+                    staleDeployments.isNotEmpty() || legacyDeploymentPresent
+                val deploymentProfile = if (removedExistingInstallation) {
+                    generateDeploymentProfile()
+                } else {
+                    existingProfile ?: generateDeploymentProfile()
+                }
+                selectedProfile = deploymentProfile
+                val markerResult = runRootOrSudo(
+                    ssh = ssh,
+                    login = login,
+                    password = password,
+                    command = "printf '%s\n' \"${'$'}(date +%s)\" > ${shQuote(INSTALL_IN_PROGRESS_MARKER_PATH)} && chmod 600 ${shQuote(INSTALL_IN_PROGRESS_MARKER_PATH)}"
+                )
+                check(markerResult.exitStatus == 0) { "Не удалось установить маркер установки" }
+                installMarkerCreated = true
+
+                val installRemoteDir = deploymentProfile.stagingDir
                 logger("Очистка…")
                 ssh.startSession().use { session ->
                     val cmd = session.exec(
-                        "rm -rf ${shQuote(INSTALL_REMOTE_DIR)} && mkdir -p ${shQuote(INSTALL_REMOTE_DIR)} && chmod 700 ${shQuote(INSTALL_REMOTE_DIR)}"
+                        "rm -rf ${shQuote(installRemoteDir)} && mkdir -p ${shQuote(installRemoteDir)} && chmod 700 ${shQuote(installRemoteDir)}"
                     )
                     cmd.join()
                     check((cmd.exitStatus ?: 1) == 0) { "Не удалось подготовить каталог установщика" }
                 }
             }
 
-            val remoteScript = "$INSTALL_REMOTE_DIR/install.sh"
+            val deploymentProfile = checkNotNull(selectedProfile)
+            val installRemoteDir = deploymentProfile.stagingDir
+            val remoteScript = "$installRemoteDir/${deploymentProfile.binaryName}.sh"
 
             logger("Подготовка файлов…")
-            val scriptBytes = INSTALL_SCRIPT.toByteArray(Charsets.UTF_8)
+            val scriptBytes = renderInstallScript(deploymentProfile, serverIp).toByteArray(Charsets.UTF_8)
 
             uploadResumableFile(
                 serverIp = serverIp,
@@ -203,7 +372,7 @@ class RemoteInstaller(private val appContext: Context) {
                 onObservedPin = { pin -> observedHostKeyPin = pin }
             )
 
-            logger("Запуск…")
+            logger("Скачивание SymposiumRelay из GitHub Release…")
             var installRun = runRemoteInstallScript(
                 serverIp = serverIp,
                 login = login,
@@ -215,22 +384,25 @@ class RemoteInstaller(private val appContext: Context) {
                 onObservedPin = { pin -> observedHostKeyPin = pin }
             )
 
-            if (installRun.exitStatus != 0 && installRun.combinedOutput.contains(RELAY_DOWNLOAD_FAILED_MARKER)) {
-                logger("Загрузка файла из приложения…")
+            if (
+                installRun.exitStatus != 0 &&
+                installRun.combinedOutput.contains(RELAY_DOWNLOAD_FAILED_MARKER)
+            ) {
+                logger("GitHub Release недоступен; используется резервный файл из приложения…")
                 val binBytes = appContext.assets.open(SERVER_BIN_ASSET_PATH).use { it.readBytes() }
                 uploadResumableFile(
                     serverIp = serverIp,
                     login = login,
                     password = password,
                     expectedSshHostKeyPin = expectedSshHostKeyPin,
-                    remotePath = "$INSTALL_REMOTE_DIR/symposium-server",
+                    remotePath = "$installRemoteDir/${deploymentProfile.binaryName}.src",
                     payload = binBytes,
-                    label = "Файл сервера",
+                    label = "Резервный файл сервера",
                     logger = logger,
                     onObservedPin = { pin -> observedHostKeyPin = pin }
                 )
 
-                logger("Повтор установки…")
+                logger("Повторный запуск с резервным файлом…")
                 installRun = runRemoteInstallScript(
                     serverIp = serverIp,
                     login = login,
@@ -243,48 +415,128 @@ class RemoteInstaller(private val appContext: Context) {
                 )
             }
 
+            if (
+                installRun.exitStatus != 0 &&
+                installRun.combinedOutput.contains(EXISTING_INSTALL_FOUND_MARKER)
+            ) {
+                logger("Во время установки найден существующий сервис; проверка…")
+                var healthyDeployment: DiscoveredDeployment? = null
+                var removedStaleDeployment = false
+                buildSshClientNoX25519().use { ssh ->
+                    val verifier = Sha256HostKeyPinVerifier(expectedSshHostKeyPin) { pin ->
+                        observedHostKeyPin = pin
+                    }
+                    ssh.addHostKeyVerifier(verifier)
+                    ssh.connect(serverIp)
+                    ssh.authPassword(login, password)
+                    val deployments = discoverRandomizedDeployments(
+                        ssh = ssh,
+                        login = login,
+                        password = password,
+                        serverIp = serverIp
+                    )
+                    healthyDeployment = deployments.firstOrNull {
+                        it.installed && it.relayInfo != null
+                    }
+                    val staleDeployments = if (healthyDeployment == null) {
+                        deployments
+                    } else {
+                        deployments.filterNot {
+                            it.profile.serviceName == healthyDeployment?.profile?.serviceName
+                        }
+                    }
+                    val legacyDeploymentPresent = hasLegacyDeployment(ssh, login, password)
+                    if (staleDeployments.isNotEmpty() || legacyDeploymentPresent) {
+                        logger("Удаление найденных неработающих установок…")
+                        staleDeployments.forEach { stale ->
+                            val removal = runRootOrSudo(
+                                ssh = ssh,
+                                login = login,
+                                password = password,
+                                command = buildRemovalScript(stale.profile)
+                            )
+                            check(removal.exitStatus == 0) {
+                                "Не удалось удалить старый сервис ${stale.profile.serviceName}"
+                            }
+                        }
+                        if (legacyDeploymentPresent) {
+                            val removal = runRootOrSudo(
+                                ssh = ssh,
+                                login = login,
+                                password = password,
+                                command = LEGACY_REMOVAL_SCRIPT
+                            )
+                            check(removal.exitStatus == 0) {
+                                "Не удалось удалить старую установку"
+                            }
+                        }
+                        removedStaleDeployment = true
+                    }
+                }
+
+                val synchronizedDeployment = healthyDeployment
+                if (synchronizedDeployment?.relayInfo != null) {
+                    logger("Конфигурация синхронизирована")
+                    return@withContext InstallResult(
+                        success = true,
+                        relayInfo = synchronizedDeployment.relayInfo,
+                        deploymentProfile = synchronizedDeployment.profile,
+                        openRooms = synchronizedDeployment.openRooms,
+                        exitStatus = 0,
+                        observedSshHostKeyPin = observedHostKeyPin
+                    )
+                }
+
+                if (removedStaleDeployment) {
+                    logger("Старые установки удалены; повтор чистой установки…")
+                    return@withContext performInstallationDetailed(
+                        serverIp = serverIp,
+                        login = login,
+                        password = password,
+                        expectedSshHostKeyPin = expectedSshHostKeyPin,
+                        existingProfile = null,
+                        logger = logger
+                    )
+                }
+
+                return@withContext InstallResult(
+                    success = false,
+                    deploymentProfile = deploymentProfile,
+                    exitStatus = EXISTING_DEPLOYMENT_UNHEALTHY_EXIT_CODE,
+                    observedSshHostKeyPin = observedHostKeyPin
+                )
+            }
+
             val exitStatus = installRun.exitStatus
             if (exitStatus != 0) {
                 logger("Ошибка установки: код $exitStatus")
                 return@withContext InstallResult(
                     success = false,
+                    deploymentProfile = deploymentProfile,
                     exitStatus = exitStatus,
                     observedSshHostKeyPin = observedHostKeyPin
                 )
             }
 
-            buildSshClientNoX25519().use { ssh ->
-                val verifier = Sha256HostKeyPinVerifier(expectedSshHostKeyPin) { pin ->
-                    observedHostKeyPin = pin
-                }
-                ssh.addHostKeyVerifier(verifier)
-                ssh.connect(serverIp)
-                ssh.authPassword(login, password)
-
-                logger("Получение данных…")
-                val raw = readRemoteFilePrivileged(ssh, login, password, RELAY_INFO_PATH)
-                if (raw.isNullOrBlank()) {
-                    logger("Готово")
-                    return@use InstallResult(
-                        success = true,
-                        relayInfo = null,
-                        relayInfoRaw = null,
-                        exitStatus = exitStatus,
-                        observedSshHostKeyPin = observedHostKeyPin
-                    )
-                }
-
-                val relayInfo = parseRelayInfo(raw, fallbackIp = serverIp)
-                logger("Готово")
-
-                InstallResult(
-                    success = true,
-                    relayInfo = relayInfo,
-                    relayInfoRaw = raw,
-                    exitStatus = exitStatus,
-                    observedSshHostKeyPin = observedHostKeyPin
-                )
-            }
+            val tlsPin = Regex("(?m)^RELAY_TLS_PIN=(sha256/[A-Za-z0-9+/=]+)$")
+                .find(installRun.combinedOutput)
+                ?.groupValues
+                ?.getOrNull(1)
+                ?: throw IllegalStateException("Установщик не вернул TLS pin")
+            logger("Готово")
+            InstallResult(
+                success = true,
+                relayInfo = RelayInfo(
+                    host = serverIp,
+                    httpsPort = deploymentProfile.publicPort,
+                    pin = tlsPin,
+                    adminToken = deploymentProfile.adminToken
+                ),
+                deploymentProfile = deploymentProfile,
+                openRooms = emptyList(),
+                exitStatus = exitStatus,
+                observedSshHostKeyPin = observedHostKeyPin
+            )
         } catch (e: Exception) {
             val sshError = explainSshConnectionIssue(e)
             val msg = e.message ?: e.javaClass.simpleName
@@ -296,6 +548,17 @@ class RemoteInstaller(private val appContext: Context) {
                 logger("Ошибка установки: $msg")
             }
             throw IllegalStateException(sshError ?: msg, e)
+        } finally {
+            if (installMarkerCreated) {
+                runCatching {
+                    clearInstallInProgressMarker(
+                        serverIp = serverIp,
+                        login = login,
+                        password = password,
+                        expectedSshHostKeyPin = expectedSshHostKeyPin
+                    )
+                }
+            }
         }
     }
 
@@ -304,6 +567,7 @@ class RemoteInstaller(private val appContext: Context) {
         login: String,
         password: String,
         expectedSshHostKeyPin: String?,
+        deploymentProfile: DeploymentProfile? = null,
         logger: suspend (String) -> Unit
     ): RelayRemovalResult = withContext(Dispatchers.IO) {
         requireKnownSshHostKeyPin(expectedSshHostKeyPin)
@@ -320,27 +584,21 @@ class RemoteInstaller(private val appContext: Context) {
                 ssh.authPassword(login, password)
 
                 logger("Удаление Relay…")
-                val cmdText = """
-                    set -e
-                    systemctl stop symposium-server.service || true
-                    systemctl disable symposium-server.service || true
-                    rm -f /etc/systemd/system/symposium-server.service
-                    systemctl daemon-reload
-                    rm -rf /opt/symposium-server
-                    userdel symposium 2>/dev/null || true
-                    groupdel symposium 2>/dev/null || true
-                    rm -f /etc/nginx/sites-enabled/symposium-relay.conf
-                    rm -f /etc/nginx/sites-available/symposium-relay.conf
-                    rm -f /etc/nginx/sites-enabled/symposium.conf
-                    rm -f /etc/nginx/sites-available/symposium.conf
-                    rm -f /etc/nginx/conf.d/symposium_ws_map.conf
-                    nginx -t >/dev/null 2>&1 && systemctl reload nginx || true
-                """.trimIndent()
+                val effectiveProfile = deploymentProfile ?: discoverRandomizedDeployments(
+                    ssh = ssh,
+                    login = login,
+                    password = password,
+                    serverIp = serverIp
+                ).firstOrNull()?.profile
+                val cmdText = effectiveProfile?.let { profile ->
+                    buildRemovalScript(profile)
+                } ?: LEGACY_REMOVAL_SCRIPT
                 val exitStatus = runRootOrSudo(ssh, login, password, cmdText).exitStatus
                 check(exitStatus == 0) { "Удаление SymposiumRelay завершилось с ошибкой (код $exitStatus)" }
 
                 ssh.startSession().use { cleanupSession ->
-                    val cleanupCmd = cleanupSession.exec("rm -rf ${shQuote(INSTALL_REMOTE_DIR)}")
+                    val stagingDir = effectiveProfile?.stagingDir ?: LEGACY_INSTALL_REMOTE_DIR
+                    val cleanupCmd = cleanupSession.exec("rm -rf ${shQuote(stagingDir)}")
                     cleanupCmd.join()
                 }
 
@@ -468,9 +726,8 @@ class RemoteInstaller(private val appContext: Context) {
                         val isRootLogin = login.trim() == "root"
                         val env = buildString {
                             append("env ")
-                            append("SYMPOSIUM_RELAY_DOWNLOAD_URL=").append(shQuote(GITHUB_SERVER_BINARY_URL)).append(' ')
                             if (forceLocalBinary) {
-                                append("SYMPOSIUM_FORCE_LOCAL_BINARY=1 ")
+                                append("RELAY_FORCE_LOCAL_BINARY=1 ")
                             }
                         }
                         val runCmd = "${env}bash ${shQuote(remoteScript)} ${shQuote(serverIp)}"
@@ -651,6 +908,33 @@ class RemoteInstaller(private val appContext: Context) {
                 ssh.connect(serverIp)
                 ssh.authPassword(login, password)
 
+                if (isInstallInProgress(ssh, login, password)) {
+                    return@use ProbeResult(
+                        installed = false,
+                        openRooms = emptyList(),
+                        observedSshHostKeyPin = observedHostKeyPin,
+                        installationInProgress = true
+                    )
+                }
+
+                val discovered = discoverRandomizedDeployments(
+                    ssh = ssh,
+                    login = login,
+                    password = password,
+                    serverIp = serverIp
+                )
+                (discovered.firstOrNull { it.installed && it.relayInfo != null }
+                    ?: discovered.firstOrNull())?.let { deployment ->
+                    return@use ProbeResult(
+                        installed = deployment.installed,
+                        openRooms = deployment.openRooms,
+                        relayInfo = deployment.relayInfo,
+                        deploymentProfile = deployment.profile,
+                        observedSshHostKeyPin = observedHostKeyPin
+                    )
+                }
+
+                // Compatibility path for installations created by older application builds.
                 val adminToken = runCatching { readAdminToken(ssh, login, password) }.getOrNull()
                 val relayInfo = runCatching {
                     readRemoteFilePrivileged(ssh, login, password, RELAY_INFO_PATH)
@@ -702,6 +986,7 @@ class RemoteInstaller(private val appContext: Context) {
                     relayInfo = relayInfo?.let { info ->
                         if (!token.isNullOrBlank() && info.adminToken.isBlank()) info.copy(adminToken = token) else info
                     },
+                    deploymentProfile = null,
                     observedSshHostKeyPin = observedHostKeyPin
                 )
             }
@@ -733,6 +1018,42 @@ class RemoteInstaller(private val appContext: Context) {
                 ssh.connect(serverIp)
                 ssh.authPassword(login, password)
 
+                val deployment = discoverRandomizedDeployments(
+                    ssh = ssh,
+                    login = login,
+                    password = password,
+                    serverIp = serverIp
+                ).firstOrNull()
+                if (deployment != null) {
+                    val actionPath = if (open) "/admin/open-room" else "/admin/close-room"
+                    val encodedRoom = URLEncoder.encode(room, Charsets.UTF_8.name())
+                    val tokenPath = "${deployment.profile.appDir}/${deployment.profile.identityDirName}/${deployment.profile.tokenName}"
+                    val result = runRootOrSudo(
+                        ssh = ssh,
+                        login = login,
+                        password = password,
+                        command = """
+                            set -e
+                            token="${'$'}(cat ${shQuote(tokenPath)})"
+                            curl -fsS -X POST -H "X-Relay-Key: ${'$'}token" ${shQuote("http://127.0.0.1:${deployment.profile.adminPort}${actionPath}?name=$encodedRoom")} >/dev/null
+                        """.trimIndent()
+                    )
+                    check(result.exitStatus == 0) {
+                        "Failed to ${if (open) "open" else "close"} room"
+                    }
+                    val refreshed = discoverRandomizedDeployments(
+                        ssh = ssh,
+                        login = login,
+                        password = password,
+                        serverIp = serverIp
+                    ).firstOrNull() ?: deployment
+                    return@use RoomAdminResult(
+                        openRooms = refreshed.openRooms,
+                        relayInfo = refreshed.relayInfo,
+                        observedSshHostKeyPin = observedHostKeyPin
+                    )
+                }
+
                 val adminToken = readAdminToken(ssh, login, password)
                 require(!adminToken.isNullOrBlank()) { "Admin token is missing on server" }
 
@@ -740,7 +1061,7 @@ class RemoteInstaller(private val appContext: Context) {
                 val encodedRoom = URLEncoder.encode(room, Charsets.UTF_8.name())
                 ssh.startSession().use { session ->
                     val cmd = session.exec(
-                        "curl -fsS -X POST -H ${shQuote("X-Symposium-Admin-Token: $adminToken")} 'http://127.0.0.1:3002${actionPath}?name=${encodedRoom}' >/dev/null"
+                        "curl -fsS -X POST -H ${shQuote("X-Relay-Key: $adminToken")} 'http://127.0.0.1:3002${actionPath}?name=${encodedRoom}' >/dev/null"
                     )
                     cmd.join()
                     check((cmd.exitStatus ?: 1) == 0) { "Failed to ${if (open) "open" else "close"} room" }
@@ -770,6 +1091,18 @@ class RemoteInstaller(private val appContext: Context) {
                 ssh.addHostKeyVerifier(verifier)
                 ssh.connect(serverIp)
                 ssh.authPassword(login, password)
+                discoverRandomizedDeployments(
+                    ssh = ssh,
+                    login = login,
+                    password = password,
+                    serverIp = serverIp
+                ).firstOrNull()?.let { deployment ->
+                    return@use RoomAdminResult(
+                        openRooms = deployment.openRooms,
+                        relayInfo = deployment.relayInfo,
+                        observedSshHostKeyPin = observedHostKeyPin
+                    )
+                }
                 fetchOpenRooms(ssh, login, password, observedHostKeyPin, serverIp)
             }
         } catch (e: Exception) {
@@ -794,7 +1127,7 @@ class RemoteInstaller(private val appContext: Context) {
         val client = pinnedHttpsClient(pin, callTimeoutSeconds = RELAY_VERSION_TIMEOUT_SECONDS)
         val request = Request.Builder()
             .url("$base/admin/version")
-            .header("X-Symposium-Admin-Token", token)
+            .header("X-Relay-Key", token)
             .get()
             .build()
 
@@ -838,7 +1171,7 @@ class RemoteInstaller(private val appContext: Context) {
         val client = pinnedHttpsClient(pin)
         val request = Request.Builder()
             .url("$base/admin/open-rooms")
-            .header("X-Symposium-Admin-Token", token)
+            .header("X-Relay-Key", token)
             .get()
             .build()
 
@@ -884,7 +1217,7 @@ class RemoteInstaller(private val appContext: Context) {
         val client = pinnedHttpsClient(pin)
         val request = Request.Builder()
             .url("$base$actionPath?name=$encodedRoom")
-            .header("X-Symposium-Admin-Token", token)
+            .header("X-Relay-Key", token)
             .post(ByteArray(0).toRequestBody(null))
             .build()
 
@@ -979,7 +1312,7 @@ class RemoteInstaller(private val appContext: Context) {
 
         val out = ssh.startSession().use { session ->
             val cmd = session.exec(
-                "curl -fsS -H ${shQuote("X-Symposium-Admin-Token: $adminToken")} http://127.0.0.1:3002/admin/open-rooms"
+                "curl -fsS -H ${shQuote("X-Relay-Key: $adminToken")} http://127.0.0.1:3002/admin/open-rooms"
             )
             cmd.join()
             val txt = cmd.inputStream.bufferedReader().readText()
@@ -1003,6 +1336,329 @@ class RemoteInstaller(private val appContext: Context) {
             relayInfo = relayInfo,
             observedSshHostKeyPin = observedSshHostKeyPin
         )
+    }
+
+    private data class ParsedDeploymentUnit(
+        val profile: DeploymentProfile,
+        val tokenPath: String,
+        val certificatePath: String
+    )
+
+    private data class DiscoveredDeployment(
+        val profile: DeploymentProfile,
+        val relayInfo: RelayInfo?,
+        val openRooms: List<OpenRoomInfo>,
+        val installed: Boolean
+    )
+
+    private fun isInstallInProgress(
+        ssh: SSHClient,
+        login: String,
+        password: String
+    ): Boolean {
+        val result = runRootOrSudo(
+            ssh = ssh,
+            login = login,
+            password = password,
+            command = """
+                marker=${shQuote(INSTALL_IN_PROGRESS_MARKER_PATH)}
+                [ -f "${'$'}marker" ] || exit 1
+                timestamp="${'$'}(tr -dc '0-9' < "${'$'}marker")"
+                [ -n "${'$'}timestamp" ] || { rm -f "${'$'}marker"; exit 1; }
+                now="${'$'}(date +%s)"
+                age="${'$'}((now - timestamp))"
+                if [ "${'$'}age" -ge 0 ] && [ "${'$'}age" -le ${INSTALL_MARKER_MAX_AGE_SECONDS} ]; then
+                  exit 0
+                fi
+                rm -f "${'$'}marker"
+                exit 1
+            """.trimIndent()
+        )
+        return result.exitStatus == 0
+    }
+
+    private fun clearInstallInProgressMarker(
+        serverIp: String,
+        login: String,
+        password: String,
+        expectedSshHostKeyPin: String?
+    ) {
+        buildSshClientNoX25519().use { ssh ->
+            ssh.addHostKeyVerifier(Sha256HostKeyPinVerifier(expectedSshHostKeyPin) { })
+            ssh.connect(serverIp)
+            ssh.authPassword(login, password)
+            runRootOrSudo(
+                ssh = ssh,
+                login = login,
+                password = password,
+                command = "rm -f ${shQuote(INSTALL_IN_PROGRESS_MARKER_PATH)}"
+            )
+        }
+    }
+
+    private fun discoverRandomizedDeployments(
+        ssh: SSHClient,
+        login: String,
+        password: String,
+        serverIp: String
+    ): List<DiscoveredDeployment> {
+        val listing = runRootOrSudo(
+            ssh = ssh,
+            login = login,
+            password = password,
+            command = RANDOMIZED_UNIT_DISCOVERY_SCRIPT
+        )
+        if (listing.exitStatus != 0) return emptyList()
+
+        val unitPaths = listing.stdout
+            .lineSequence()
+            .map(String::trim)
+            .filter { DISCOVERABLE_UNIT_PATH.matches(it) }
+            .distinct()
+            .sorted()
+            .toList()
+
+        val discovered = unitPaths.mapNotNull { unitPath ->
+            val unitText = readRemoteFilePrivileged(ssh, login, password, unitPath)
+                ?.takeIf { it.isNotBlank() }
+                ?: return@mapNotNull null
+            val parsed = parseRandomizedDeploymentUnit(unitPath, unitText)
+                ?: return@mapNotNull null
+
+            val adminToken = readRemoteFilePrivileged(ssh, login, password, parsed.tokenPath)
+                ?.trim()
+                ?.takeIf { it.isNotBlank() }
+                .orEmpty()
+            val tlsPin = readCertificatePin(
+                ssh = ssh,
+                login = login,
+                password = password,
+                certificatePath = parsed.certificatePath
+            )
+
+            val profile = parsed.profile.copy(adminToken = adminToken)
+            val relayInfo = tlsPin?.takeIf { adminToken.isNotBlank() }?.let {
+                RelayInfo(
+                    host = serverIp,
+                    httpsPort = profile.publicPort,
+                    pin = it,
+                    adminToken = adminToken
+                )
+            }
+            val rooms = if (adminToken.isNotBlank()) {
+                readDeploymentRoomsOverLoopback(
+                    ssh = ssh,
+                    login = login,
+                    password = password,
+                    profile = profile,
+                    tokenPath = parsed.tokenPath
+                )
+            } else {
+                null
+            }
+
+            DiscoveredDeployment(
+                profile = profile,
+                relayInfo = relayInfo,
+                openRooms = rooms ?: emptyList(),
+                installed = relayInfo != null && rooms != null
+            )
+        }
+
+        return discovered.sortedWith(
+            compareByDescending<DiscoveredDeployment> { it.installed }
+                .thenBy { it.profile.serviceName }
+        )
+    }
+
+    private fun parseRandomizedDeploymentUnit(
+        unitPath: String,
+        unitText: String
+    ): ParsedDeploymentUnit? = runCatching {
+        fun property(name: String): String {
+            return unitText.lineSequence()
+                .map(String::trim)
+                .firstOrNull { it.startsWith("$name=") }
+                ?.substringAfter('=')
+                ?.trim()
+                ?.takeIf { it.isNotBlank() }
+                ?: error("Missing $name")
+        }
+
+        val serviceName = unitPath
+            .substringAfterLast('/')
+            .removeSuffix(".service")
+            .also { require(SAFE_SYSTEMD_NAME.matches(it)) }
+        val appDir = property("WorkingDirectory").trimEnd('/')
+            .also(::requireSafeAbsolutePath)
+        val serviceUser = property("User").also { require(SAFE_ACCOUNT_NAME.matches(it)) }
+        val serviceGroup = property("Group").also { require(SAFE_ACCOUNT_NAME.matches(it)) }
+        val execStart = property("ExecStart")
+        val tokens = execStart.split(Regex("\\s+")).filter(String::isNotBlank)
+        require(tokens.size >= 2)
+
+        fun optionalFlagValue(name: String): String? {
+            tokens.firstOrNull { it.startsWith("$name=") }?.let {
+                return it.substringAfter('=').takeIf(String::isNotBlank)
+            }
+            val index = tokens.indexOf(name)
+            return if (index >= 0 && index + 1 < tokens.size) tokens[index + 1] else null
+        }
+
+        fun flagValue(name: String): String {
+            return optionalFlagValue(name) ?: error("Missing or empty $name")
+        }
+
+        require(flagValue("--admin-on-public").equals("true", ignoreCase = true))
+        val executablePath = tokens.first().also(::requireSafeAbsolutePath)
+        val databasePath = flagValue("--rooms-db").also(::requireSafeAbsolutePath)
+        val tokenPath = flagValue("--admin-token-file").also(::requireSafeAbsolutePath)
+        val certificatePath = flagValue("--tls-cert").also(::requireSafeAbsolutePath)
+        val privateKeyPath = flagValue("--tls-key").also(::requireSafeAbsolutePath)
+
+        val (binaryDirName, binaryName) = splitManagedFilePath(appDir, executablePath)
+        val (stateDirName, databaseName) = splitManagedFilePath(appDir, databasePath)
+        val (identityDirName, tokenName) = splitManagedFilePath(appDir, tokenPath)
+        val (certificateDirName, certificateName) = splitManagedFilePath(appDir, certificatePath)
+        val (privateKeyDirName, privateKeyName) = splitManagedFilePath(appDir, privateKeyPath)
+        require(identityDirName == certificateDirName && identityDirName == privateKeyDirName)
+
+        val publicPort = parseListenPort(flagValue("--addr"))
+        val adminAddress = flagValue("--admin-addr")
+        require(
+            adminAddress.startsWith("127.0.0.1:") ||
+                adminAddress.startsWith("localhost:")
+        )
+        val adminPort = parseListenPort(adminAddress)
+        val iceMin = flagValue("--ice-udp-port-min").toInt()
+        val iceMax = flagValue("--ice-udp-port-max").toInt()
+        require(publicPort != adminPort)
+        require(iceMin in 1..65535 && iceMax in iceMin..65535)
+
+        val dbTable = flagValue("--db-table").also { require(SAFE_DB_IDENTIFIER.matches(it)) }
+        val dbRoomColumn = flagValue("--db-room-column").also { require(SAFE_DB_IDENTIFIER.matches(it)) }
+        val dbKeyColumn = flagValue("--db-key-column").also { require(SAFE_DB_IDENTIFIER.matches(it)) }
+        require(dbRoomColumn != dbKeyColumn)
+
+        ParsedDeploymentUnit(
+            profile = DeploymentProfile(
+                appDir = appDir,
+                serviceName = serviceName,
+                instanceName = optionalFlagValue("--instance-name")
+                    ?.also { require(SAFE_SYSTEMD_NAME.matches(it)) }
+                    ?: serviceName,
+                serviceUser = serviceUser,
+                serviceGroup = serviceGroup,
+                binaryDirName = binaryDirName,
+                stateDirName = stateDirName,
+                identityDirName = identityDirName,
+                binaryName = binaryName,
+                databaseName = databaseName,
+                tokenName = tokenName,
+                certificateName = certificateName,
+                privateKeyName = privateKeyName,
+                dbTable = dbTable,
+                dbRoomColumn = dbRoomColumn,
+                dbKeyColumn = dbKeyColumn,
+                publicPort = publicPort,
+                adminPort = adminPort,
+                iceUdpPortMin = iceMin,
+                iceUdpPortMax = iceMax,
+                firewallTag = serviceName,
+                stagingDir = ".cache/.${randomHex(8)}",
+                adminToken = ""
+            ),
+            tokenPath = tokenPath,
+            certificatePath = certificatePath
+        )
+    }.getOrNull()
+
+    private fun requireSafeAbsolutePath(path: String) {
+        require(SAFE_ABSOLUTE_PATH.matches(path))
+        require(path != "/")
+        require(path.split('/').none { it == "." || it == ".." })
+    }
+
+    private fun splitManagedFilePath(appDir: String, path: String): Pair<String, String> {
+        val prefix = "$appDir/"
+        require(path.startsWith(prefix))
+        val parts = path.removePrefix(prefix).split('/')
+        require(parts.size == 2)
+        parts.forEach { require(SAFE_PATH_COMPONENT.matches(it)) }
+        return parts[0] to parts[1]
+    }
+
+    private fun parseListenPort(address: String): Int {
+        val port = address.substringAfterLast(':').toInt()
+        require(port in 1..65535)
+        return port
+    }
+
+    private fun readCertificatePin(
+        ssh: SSHClient,
+        login: String,
+        password: String,
+        certificatePath: String
+    ): String? {
+        val result = runRootOrSudo(
+            ssh = ssh,
+            login = login,
+            password = password,
+            command = """
+                set -e
+                openssl x509 -in ${shQuote(certificatePath)} -pubkey -noout |
+                  openssl pkey -pubin -outform DER |
+                  openssl dgst -sha256 -binary |
+                  openssl base64 -A
+            """.trimIndent()
+        )
+        if (result.exitStatus != 0) return null
+        val value = result.stdout.trim()
+        if (!BASE64_VALUE.matches(value)) return null
+        return "sha256/$value"
+    }
+
+    private fun readDeploymentRoomsOverLoopback(
+        ssh: SSHClient,
+        login: String,
+        password: String,
+        profile: DeploymentProfile,
+        tokenPath: String
+    ): List<OpenRoomInfo>? {
+        val result = runRootOrSudo(
+            ssh = ssh,
+            login = login,
+            password = password,
+            command = """
+                set -e
+                token="${'$'}(cat ${shQuote(tokenPath)})"
+                version="${'$'}(curl -fsS --connect-timeout 5 --max-time 10 -H "X-Relay-Key: ${'$'}token" http://127.0.0.1:${profile.adminPort}/admin/version)"
+                rooms="${'$'}(curl -fsS --connect-timeout 5 --max-time 10 -H "X-Relay-Key: ${'$'}token" http://127.0.0.1:${profile.adminPort}/admin/open-rooms)"
+                printf 'VERSION_B64=%s\n' "${'$'}(printf '%s' "${'$'}version" | base64 | tr -d '\n')"
+                printf 'ROOMS_B64=%s\n' "${'$'}(printf '%s' "${'$'}rooms" | base64 | tr -d '\n')"
+            """.trimIndent()
+        )
+        if (result.exitStatus != 0) return null
+
+        val values = result.stdout.lineSequence()
+            .mapNotNull { line ->
+                val separator = line.indexOf('=')
+                if (separator <= 0) null else line.substring(0, separator) to line.substring(separator + 1)
+            }
+            .toMap()
+        val versionJson = decodeBase64Text(values["VERSION_B64"]) ?: return null
+        val roomsJson = decodeBase64Text(values["ROOMS_B64"]) ?: return null
+        val version = runCatching { JSONObject(versionJson) }.getOrNull() ?: return null
+        if (version.optString("version").isBlank()) return null
+        if (version.optString("name").isBlank()) return null
+        return parseOpenRoomsJson(roomsJson)
+    }
+
+    private fun decodeBase64Text(value: String?): String? {
+        val encoded = value?.trim()?.takeIf { BASE64_VALUE.matches(it) } ?: return null
+        return runCatching {
+            Base64.decode(encoded, Base64.DEFAULT).toString(Charsets.UTF_8)
+        }.getOrNull()
     }
 
     private data class RemoteCommandResult(
@@ -1040,6 +1696,23 @@ class RemoteInstaller(private val appContext: Context) {
                 stderr = cmd.errorStream.bufferedReader().readText()
             )
         }
+    }
+
+    private fun hasLegacyDeployment(
+        ssh: SSHClient,
+        login: String,
+        password: String
+    ): Boolean {
+        val result = runRootOrSudo(
+            ssh = ssh,
+            login = login,
+            password = password,
+            command = """
+                test -f /etc/systemd/system/symposium-server.service ||
+                test -d /opt/symposium-server
+            """.trimIndent()
+        )
+        return result.exitStatus == 0
     }
 
     private fun readRemoteFile(ssh: SSHClient, path: String): String? {
@@ -1232,14 +1905,126 @@ class RemoteInstaller(private val appContext: Context) {
 
     private fun shQuote(s: String): String = "'" + s.replace("'", "'\"'\"'") + "'"
 
+    private fun randomHex(bytes: Int): String {
+        val value = ByteArray(bytes)
+        SecureRandom().nextBytes(value)
+        return value.joinToString("") { "%02x".format(it) }
+    }
+
+    private fun randomSecret(bytes: Int = 32): String {
+        val value = ByteArray(bytes)
+        SecureRandom().nextBytes(value)
+        return Base64.encodeToString(value, Base64.NO_WRAP or Base64.URL_SAFE or Base64.NO_PADDING)
+    }
+
+    private fun generateDeploymentProfile(): DeploymentProfile {
+        val root = randomHex(8)
+        val userSuffix = randomHex(5)
+        val publicPort = 20_000 + SecureRandom().nextInt(35_000)
+        var adminPort = 20_000 + SecureRandom().nextInt(35_000)
+        while (adminPort == publicPort) adminPort = 20_000 + SecureRandom().nextInt(35_000)
+        val iceMin = 30_000 + SecureRandom().nextInt(12_000)
+        val dbRoomColumn = "c_${randomHex(7)}"
+        var dbKeyColumn = "c_${randomHex(7)}"
+        while (dbKeyColumn == dbRoomColumn) dbKeyColumn = "c_${randomHex(7)}"
+        return DeploymentProfile(
+            appDir = "/opt/.$root",
+            serviceName = "w${randomHex(7)}",
+            instanceName = "n${randomHex(9)}",
+            serviceUser = "u$userSuffix",
+            serviceGroup = "g$userSuffix",
+            binaryDirName = ".${randomHex(6)}",
+            stateDirName = ".${randomHex(6)}",
+            identityDirName = ".${randomHex(6)}",
+            binaryName = "x${randomHex(8)}",
+            databaseName = ".${randomHex(7)}.dat",
+            tokenName = ".${randomHex(7)}.key",
+            certificateName = ".${randomHex(7)}.crt",
+            privateKeyName = ".${randomHex(7)}.pem",
+            dbTable = "t_${randomHex(7)}",
+            dbRoomColumn = dbRoomColumn,
+            dbKeyColumn = dbKeyColumn,
+            publicPort = publicPort,
+            adminPort = adminPort,
+            iceUdpPortMin = iceMin,
+            iceUdpPortMax = iceMin + 199,
+            firewallTag = "r${randomHex(7)}",
+            stagingDir = ".cache/.${randomHex(8)}",
+            adminToken = randomSecret()
+        )
+    }
+
+    private fun renderInstallScript(profile: DeploymentProfile, serverIp: String): String {
+        val replacements = mapOf(
+            "@@SERVER_IP@@" to shQuote(serverIp),
+            "@@APP_DIR@@" to shQuote(profile.appDir),
+            "@@SERVICE_NAME@@" to shQuote(profile.serviceName),
+            "@@INSTANCE_NAME@@" to shQuote(profile.instanceName),
+            "@@SERVICE_USER@@" to shQuote(profile.serviceUser),
+            "@@SERVICE_GROUP@@" to shQuote(profile.serviceGroup),
+            "@@BINARY_DIR_NAME@@" to shQuote(profile.binaryDirName),
+            "@@STATE_DIR_NAME@@" to shQuote(profile.stateDirName),
+            "@@IDENTITY_DIR_NAME@@" to shQuote(profile.identityDirName),
+            "@@BINARY_NAME@@" to shQuote(profile.binaryName),
+            "@@DATABASE_NAME@@" to shQuote(profile.databaseName),
+            "@@TOKEN_NAME@@" to shQuote(profile.tokenName),
+            "@@CERTIFICATE_NAME@@" to shQuote(profile.certificateName),
+            "@@PRIVATE_KEY_NAME@@" to shQuote(profile.privateKeyName),
+            "@@DB_TABLE@@" to shQuote(profile.dbTable),
+            "@@DB_ROOM_COLUMN@@" to shQuote(profile.dbRoomColumn),
+            "@@DB_KEY_COLUMN@@" to shQuote(profile.dbKeyColumn),
+            "@@PUBLIC_PORT@@" to profile.publicPort.toString(),
+            "@@ADMIN_PORT@@" to profile.adminPort.toString(),
+            "@@ICE_MIN@@" to profile.iceUdpPortMin.toString(),
+            "@@ICE_MAX@@" to profile.iceUdpPortMax.toString(),
+            "@@FIREWALL_TAG@@" to shQuote(profile.firewallTag),
+            "@@ADMIN_TOKEN@@" to shQuote(profile.adminToken)
+        )
+        return replacements.entries.fold(ISOLATED_INSTALL_SCRIPT) { script, entry ->
+            script.replace(entry.key, entry.value)
+        }
+    }
+
+    private fun buildRemovalScript(profile: DeploymentProfile): String = """
+        set -Eeuo pipefail
+        SERVICE=${shQuote(profile.serviceName)}
+        APP_DIR=${shQuote(profile.appDir)}
+        APP_USER=${shQuote(profile.serviceUser)}
+        APP_GROUP=${shQuote(profile.serviceGroup)}
+        PUBLIC_PORT=${profile.publicPort}
+        ICE_MIN=${profile.iceUdpPortMin}
+        ICE_MAX=${profile.iceUdpPortMax}
+        FIREWALL_TAG=${shQuote(profile.firewallTag)}
+        systemctl stop "${'$'}{SERVICE}.service" 2>/dev/null || true
+        systemctl disable "${'$'}{SERVICE}.service" 2>/dev/null || true
+        rm -f "/etc/systemd/system/${'$'}{SERVICE}.service"
+        systemctl daemon-reload
+        rm -rf "${'$'}APP_DIR"
+        userdel "${'$'}APP_USER" 2>/dev/null || true
+        groupdel "${'$'}APP_GROUP" 2>/dev/null || true
+        if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q '^Status: active'; then
+          ufw --force delete allow "${'$'}PUBLIC_PORT/tcp" >/dev/null 2>&1 || true
+          ufw --force delete allow "${'$'}ICE_MIN:${'$'}ICE_MAX/udp" >/dev/null 2>&1 || true
+        fi
+        if command -v firewall-cmd >/dev/null 2>&1 && firewall-cmd --state >/dev/null 2>&1; then
+          firewall-cmd --permanent --remove-port="${'$'}PUBLIC_PORT/tcp" >/dev/null 2>&1 || true
+          firewall-cmd --permanent --remove-port="${'$'}ICE_MIN-${'$'}ICE_MAX/udp" >/dev/null 2>&1 || true
+          firewall-cmd --reload >/dev/null 2>&1 || true
+        fi
+    """.trimIndent()
+
     companion object {
-        private const val INSTALL_REMOTE_DIR = ".symposium-installer"
+        private const val LEGACY_INSTALL_REMOTE_DIR = ".symposium-installer"
         private const val RELAY_INFO_PATH = "/opt/symposium-server/relay-info.json"
         private const val ADMIN_TOKEN_PATH = "/opt/symposium-server/admin-token"
         private const val OPEN_ROOMS_DB_PATH = "/opt/symposium-server/open_rooms.db"
         private const val SERVER_BIN_ASSET_PATH = "symposium/symposium-server-linux-amd64"
         private const val GITHUB_SERVER_BINARY_URL = "https://github.com/legotkin/symposium-relay/releases/download/symposium/symposium-server-linux-amd64"
         private const val RELAY_DOWNLOAD_FAILED_MARKER = "RELAY_DOWNLOAD_FAILED"
+        private const val EXISTING_INSTALL_FOUND_MARKER = "EXISTING_INSTALL_FOUND"
+        private const val EXISTING_DEPLOYMENT_UNHEALTHY_EXIT_CODE = 42
+        private const val INSTALL_IN_PROGRESS_MARKER_PATH = "/run/.network-worker-bootstrap.pending"
+        private const val INSTALL_MARKER_MAX_AGE_SECONDS = 30 * 60
         private const val UPLOAD_CHUNK_SIZE = 16 * 1024
         private const val MAX_UPLOAD_RETRIES = 10
         private const val MAX_SSH_REQUEST_RETRIES = 4
@@ -1248,6 +2033,262 @@ class RemoteInstaller(private val appContext: Context) {
         private const val RELAY_VERSION_TIMEOUT_SECONDS = 8L
         private const val RELAY_VERSION_TIMEOUT_MS = RELAY_VERSION_TIMEOUT_SECONDS * 1000L
         private const val UPLOAD_PROGRESS_STEP_PERCENT = 5
+        private val DISCOVERABLE_UNIT_PATH =
+            Regex("^/etc/systemd/system/[A-Za-z0-9_.@-]+\\.service$")
+        private val SAFE_SYSTEMD_NAME = Regex("^[A-Za-z0-9_.@-]{1,128}$")
+        private val SAFE_ACCOUNT_NAME = Regex("^[A-Za-z_][A-Za-z0-9_-]{0,30}$")
+        private val SAFE_DB_IDENTIFIER = Regex("^[A-Za-z_][A-Za-z0-9_]{0,127}$")
+        private val SAFE_ABSOLUTE_PATH = Regex("^/[A-Za-z0-9._/-]+$")
+        private val SAFE_PATH_COMPONENT = Regex("^[A-Za-z0-9._-]+$")
+        private val BASE64_VALUE = Regex("^[A-Za-z0-9+/]+={0,2}$")
+
+        private val RANDOMIZED_UNIT_DISCOVERY_SCRIPT = """
+            set -e
+            for unit in /etc/systemd/system/*.service; do
+              [ -f "${'$'}unit" ] || continue
+              grep -Fq -- '--admin-on-public=true' "${'$'}unit" || continue
+              grep -Fq -- '--rooms-db' "${'$'}unit" || continue
+              grep -Fq -- '--db-table' "${'$'}unit" || continue
+              grep -Fq -- '--db-room-column' "${'$'}unit" || continue
+              grep -Fq -- '--db-key-column' "${'$'}unit" || continue
+              grep -Fq -- '--admin-token-file' "${'$'}unit" || continue
+              grep -Fq -- '--tls-cert' "${'$'}unit" || continue
+              grep -Fq -- '--tls-key' "${'$'}unit" || continue
+              grep -Fq -- '--ice-udp-port-min' "${'$'}unit" || continue
+              grep -Fq -- '--ice-udp-port-max' "${'$'}unit" || continue
+              printf '%s\n' "${'$'}unit"
+            done
+        """.trimIndent()
+
+        private val LEGACY_REMOVAL_SCRIPT = """
+            set -e
+            systemctl stop symposium-server.service || true
+            systemctl disable symposium-server.service || true
+            rm -f /etc/systemd/system/symposium-server.service
+            systemctl daemon-reload
+            rm -rf /opt/symposium-server
+            userdel symposium 2>/dev/null || true
+            groupdel symposium 2>/dev/null || true
+            rm -f /etc/nginx/sites-enabled/symposium-relay.conf
+            rm -f /etc/nginx/sites-available/symposium-relay.conf
+            rm -f /etc/nginx/sites-enabled/symposium.conf
+            rm -f /etc/nginx/sites-available/symposium.conf
+            rm -f /etc/nginx/conf.d/symposium_ws_map.conf
+            nginx -t >/dev/null 2>&1 && systemctl reload nginx || true
+        """.trimIndent()
+
+        private val ISOLATED_INSTALL_SCRIPT = """
+            #!/usr/bin/env bash
+            set -Eeuo pipefail
+            log(){ echo "[${'$'}(date +'%F %T')] ${'$'}*"; }
+            die(){ echo "ERROR: ${'$'}*" >&2; exit 1; }
+            need_cmd(){ command -v "${'$'}1" >/dev/null 2>&1; }
+            [ "${'$'}{EUID:-1}" -eq 0 ] || die "installer must be run as root"
+
+            SERVER_IP=@@SERVER_IP@@
+            APP_DIR=@@APP_DIR@@
+            SERVICE_NAME=@@SERVICE_NAME@@
+            INSTANCE_NAME=@@INSTANCE_NAME@@
+            APP_USER=@@SERVICE_USER@@
+            APP_GROUP=@@SERVICE_GROUP@@
+            BINARY_DIR_NAME=@@BINARY_DIR_NAME@@
+            STATE_DIR_NAME=@@STATE_DIR_NAME@@
+            IDENTITY_DIR_NAME=@@IDENTITY_DIR_NAME@@
+            BINARY_NAME=@@BINARY_NAME@@
+            DATABASE_NAME=@@DATABASE_NAME@@
+            TOKEN_NAME=@@TOKEN_NAME@@
+            CERTIFICATE_NAME=@@CERTIFICATE_NAME@@
+            PRIVATE_KEY_NAME=@@PRIVATE_KEY_NAME@@
+            DB_TABLE=@@DB_TABLE@@
+            DB_ROOM_COLUMN=@@DB_ROOM_COLUMN@@
+            DB_KEY_COLUMN=@@DB_KEY_COLUMN@@
+            PUBLIC_PORT=@@PUBLIC_PORT@@
+            ADMIN_PORT=@@ADMIN_PORT@@
+            ICE_MIN=@@ICE_MIN@@
+            ICE_MAX=@@ICE_MAX@@
+            FIREWALL_TAG=@@FIREWALL_TAG@@
+            ADMIN_TOKEN=@@ADMIN_TOKEN@@
+            SCRIPT_DIR="${'$'}(cd "${'$'}(dirname "${'$'}{BASH_SOURCE[0]}")" && pwd)"
+            RELAY_DOWNLOAD_URL="${'$'}{SYMPOSIUM_RELAY_DOWNLOAD_URL:-https://github.com/legotkin/symposium-relay/releases/download/symposium/symposium-server-linux-amd64}"
+            LOCAL_BINARY="${'$'}SCRIPT_DIR/${'$'}BINARY_NAME.src"
+            DOWNLOADED_BINARY="${'$'}SCRIPT_DIR/${'$'}BINARY_NAME.download"
+            SERVER_BINARY_SOURCE=""
+            KEEP_STAGING=0
+            BINARY_DIR="${'$'}APP_DIR/${'$'}BINARY_DIR_NAME"
+            STATE_DIR="${'$'}APP_DIR/${'$'}STATE_DIR_NAME"
+            IDENTITY_DIR="${'$'}APP_DIR/${'$'}IDENTITY_DIR_NAME"
+            DATABASE_PATH="${'$'}STATE_DIR/${'$'}DATABASE_NAME"
+            TOKEN_PATH="${'$'}IDENTITY_DIR/${'$'}TOKEN_NAME"
+            CERTIFICATE_PATH="${'$'}IDENTITY_DIR/${'$'}CERTIFICATE_NAME"
+            PRIVATE_KEY_PATH="${'$'}IDENTITY_DIR/${'$'}PRIVATE_KEY_NAME"
+
+            cleanup(){
+              if [ "${'$'}KEEP_STAGING" = "1" ]; then
+                return 0
+              fi
+              rm -rf "${'$'}SCRIPT_DIR" 2>/dev/null || true
+            }
+            trap cleanup EXIT
+
+            need_cmd flock || die "required lock utility is unavailable"
+            exec 9>/run/lock/.network-worker-bootstrap.lock
+            flock -w 300 9 || die "another installer is still running"
+
+            EXISTING_UNIT=""
+            for unit in /etc/systemd/system/*.service; do
+              [ -f "${'$'}unit" ] || continue
+              grep -Fq -- '--admin-on-public=true' "${'$'}unit" || continue
+              grep -Fq -- '--rooms-db' "${'$'}unit" || continue
+              grep -Fq -- '--db-table' "${'$'}unit" || continue
+              grep -Fq -- '--db-room-column' "${'$'}unit" || continue
+              grep -Fq -- '--db-key-column' "${'$'}unit" || continue
+              grep -Fq -- '--admin-token-file' "${'$'}unit" || continue
+              grep -Fq -- '--tls-cert' "${'$'}unit" || continue
+              grep -Fq -- '--tls-key' "${'$'}unit" || continue
+              EXISTING_UNIT="${'$'}unit"
+              break
+            done
+            if [ -n "${'$'}EXISTING_UNIT" ]; then
+              echo "EXISTING_INSTALL_FOUND" >&2
+              exit 42
+            fi
+
+            download_release_binary() {
+              local tmp="${'$'}{DOWNLOADED_BINARY}.part"
+              rm -f "${'$'}DOWNLOADED_BINARY" "${'$'}tmp"
+              log "Downloading SymposiumRelay from GitHub Release"
+
+              set +e
+              curl -fL --show-error --connect-timeout 15 --max-time 900 \
+                -o "${'$'}tmp" "${'$'}RELAY_DOWNLOAD_URL"
+              local rc=${'$'}?
+              set -e
+
+              if [ "${'$'}rc" -eq 0 ] && [ -s "${'$'}tmp" ]; then
+                chmod 0750 "${'$'}tmp"
+                mv -f "${'$'}tmp" "${'$'}DOWNLOADED_BINARY"
+                SERVER_BINARY_SOURCE="${'$'}DOWNLOADED_BINARY"
+                log "GitHub Release download complete"
+                return 0
+              fi
+
+              rm -f "${'$'}tmp" "${'$'}DOWNLOADED_BINARY"
+              log "GitHub Release download failed"
+              return 1
+            }
+
+            select_server_binary() {
+              if [ "${'$'}{RELAY_FORCE_LOCAL_BINARY:-0}" = "1" ]; then
+                [ -s "${'$'}LOCAL_BINARY" ] || die "RELAY_DOWNLOAD_FAILED: app fallback binary is not available"
+                SERVER_BINARY_SOURCE="${'$'}LOCAL_BINARY"
+                log "Using SymposiumRelay binary uploaded by the app"
+                return 0
+              fi
+
+              if download_release_binary; then
+                return 0
+              fi
+
+              KEEP_STAGING=1
+              die "RELAY_DOWNLOAD_FAILED: GitHub Release download failed"
+            }
+
+            log "[1/8] Detect OS"
+            [ -r /etc/os-release ] || die "unsupported operating system"
+            . /etc/os-release
+            case "${'$'}{ID:-}" in debian|ubuntu) ;; *) die "unsupported operating system" ;; esac
+
+            log "[2/8] Install runtime dependencies"
+            export DEBIAN_FRONTEND=noninteractive
+            apt-get -o Dpkg::Use-Pty=0 -o Acquire::Retries=3 -o DPkg::Lock::Timeout=300 update
+            apt-get -o Dpkg::Use-Pty=0 -o Acquire::Retries=3 -o DPkg::Lock::Timeout=300 install -y ca-certificates curl openssl
+
+            select_server_binary
+
+            systemctl stop "${'$'}SERVICE_NAME.service" 2>/dev/null || true
+            port_busy(){ ss -ltnH 2>/dev/null | awk '{print ${'$'}4}' | grep -Eq "(^|:)${'$'}1${'$'}"; }
+            if port_busy "${'$'}PUBLIC_PORT"; then die "selected public TCP port is already in use"; fi
+            if port_busy "${'$'}ADMIN_PORT"; then die "selected admin TCP port is already in use"; fi
+
+            log "[3/8] Configure isolated firewall ports"
+            if need_cmd ufw && ufw status 2>/dev/null | grep -q '^Status: active'; then
+              ufw allow "${'$'}PUBLIC_PORT/tcp" comment "${'$'}FIREWALL_TAG" >/dev/null
+              ufw allow "${'$'}ICE_MIN:${'$'}ICE_MAX/udp" comment "${'$'}FIREWALL_TAG" >/dev/null
+            elif need_cmd firewall-cmd && firewall-cmd --state >/dev/null 2>&1; then
+              firewall-cmd --permanent --add-port="${'$'}PUBLIC_PORT/tcp" >/dev/null
+              firewall-cmd --permanent --add-port="${'$'}ICE_MIN-${'$'}ICE_MAX/udp" >/dev/null
+              firewall-cmd --reload >/dev/null
+            else
+              log "No managed firewall is active; no global firewall configuration changed"
+            fi
+
+            log "[4/8] Create isolated identity"
+            getent group "${'$'}APP_GROUP" >/dev/null 2>&1 || groupadd --system "${'$'}APP_GROUP"
+            id -u "${'$'}APP_USER" >/dev/null 2>&1 || useradd --system --gid "${'$'}APP_GROUP" --home-dir "${'$'}APP_DIR" --no-create-home --shell /usr/sbin/nologin "${'$'}APP_USER"
+            install -d -o "${'$'}APP_USER" -g "${'$'}APP_GROUP" -m 0750 "${'$'}APP_DIR"
+            install -d -o "${'$'}APP_USER" -g "${'$'}APP_GROUP" -m 0750 "${'$'}BINARY_DIR" "${'$'}STATE_DIR"
+            install -d -o "${'$'}APP_USER" -g "${'$'}APP_GROUP" -m 0700 "${'$'}IDENTITY_DIR"
+            umask 077
+            printf '%s\n' "${'$'}ADMIN_TOKEN" > "${'$'}TOKEN_PATH"
+
+            log "[5/8] Generate pinned TLS identity"
+            openssl req -x509 -newkey rsa:3072 -sha256 -nodes -days 825 \
+              -subj "/CN=${'$'}SERVER_IP" \
+              -addext "subjectAltName=IP:${'$'}SERVER_IP" \
+              -keyout "${'$'}PRIVATE_KEY_PATH" -out "${'$'}CERTIFICATE_PATH" >/dev/null 2>&1
+            PIN="${'$'}(openssl x509 -in "${'$'}CERTIFICATE_PATH" -pubkey -noout | openssl pkey -pubin -outform DER | openssl dgst -sha256 -binary | openssl base64 -A)"
+            PIN="sha256/${'$'}PIN"
+
+            log "[6/8] Install isolated worker"
+            [ -s "${'$'}SERVER_BINARY_SOURCE" ] || die "selected server binary is missing"
+            install -o "${'$'}APP_USER" -g "${'$'}APP_GROUP" -m 0750 "${'$'}SERVER_BINARY_SOURCE" "${'$'}BINARY_DIR/${'$'}BINARY_NAME"
+            install -o "${'$'}APP_USER" -g "${'$'}APP_GROUP" -m 0600 /dev/null "${'$'}DATABASE_PATH"
+            chown "${'$'}APP_USER:${'$'}APP_GROUP" "${'$'}TOKEN_PATH" "${'$'}CERTIFICATE_PATH" "${'$'}PRIVATE_KEY_PATH"
+            chmod 600 "${'$'}TOKEN_PATH" "${'$'}PRIVATE_KEY_PATH"
+            chmod 644 "${'$'}CERTIFICATE_PATH"
+
+            cat > "/etc/systemd/system/${'$'}SERVICE_NAME.service" <<UNIT
+            [Unit]
+            Description=Managed network worker
+            After=network-online.target
+            Wants=network-online.target
+
+            [Service]
+            Type=simple
+            WorkingDirectory=${'$'}APP_DIR
+            ExecStart=${'$'}BINARY_DIR/${'$'}BINARY_NAME --instance-name ${'$'}INSTANCE_NAME --addr :${'$'}PUBLIC_PORT --admin-addr 127.0.0.1:${'$'}ADMIN_PORT --admin-on-public=true --public-base-url https://${'$'}SERVER_IP:${'$'}PUBLIC_PORT --public-ip ${'$'}SERVER_IP --nat1to1 ${'$'}SERVER_IP --rooms-db ${'$'}DATABASE_PATH --db-table ${'$'}DB_TABLE --db-room-column ${'$'}DB_ROOM_COLUMN --db-key-column ${'$'}DB_KEY_COLUMN --admin-token-file ${'$'}TOKEN_PATH --tls-cert ${'$'}CERTIFICATE_PATH --tls-key ${'$'}PRIVATE_KEY_PATH --ice-udp-port-min ${'$'}ICE_MIN --ice-udp-port-max ${'$'}ICE_MAX
+            Restart=always
+            RestartSec=2
+            User=${'$'}APP_USER
+            Group=${'$'}APP_GROUP
+            NoNewPrivileges=true
+            PrivateTmp=true
+            ProtectSystem=strict
+            ProtectHome=true
+            PrivateDevices=true
+            ReadWritePaths=${'$'}APP_DIR
+            CapabilityBoundingSet=
+            AmbientCapabilities=
+            LockPersonality=true
+            MemoryDenyWriteExecute=true
+            SystemCallArchitectures=native
+
+            [Install]
+            WantedBy=multi-user.target
+            UNIT
+
+            log "[7/8] Start isolated service"
+            systemctl daemon-reload
+            systemctl enable "${'$'}SERVICE_NAME.service" >/dev/null
+            systemctl restart "${'$'}SERVICE_NAME.service"
+            sleep 2
+            systemctl is-active --quiet "${'$'}SERVICE_NAME.service" || die "service failed to start"
+
+            log "[8/8] Verify pinned HTTPS endpoint"
+            curl -kfsS --connect-timeout 10 -H "X-Relay-Key: ${'$'}ADMIN_TOKEN" "https://127.0.0.1:${'$'}PUBLIC_PORT/admin/version" >/dev/null
+            echo "RELAY_TLS_PIN=${'$'}PIN"
+            echo "Installation finished."
+        """.trimIndent()
 
         private val INSTALL_SCRIPT = """
             #!/usr/bin/env bash
@@ -1991,7 +3032,14 @@ class InstallServersStore(context: Context) {
             val httpsPort = o.optInt("httpsPort", -1).takeIf { it > 0 }
             val relayTlsPin = o.optString("relayTlsPin").takeIf { it.isNotBlank() }
             val adminToken = o.optString("adminToken").takeIf { it.isNotBlank() }
+            val deploymentProfile = deploymentProfileFromJson(o.optJSONObject("deploymentProfile"))
             val openRooms = parseOpenRoomsArray(o.optJSONArray("openRooms") ?: JSONArray())
+            val relayVersion = o.optString("relayVersion").takeIf { it.isNotBlank() }
+            val relayVersionState = runCatching {
+                RelayVersionState.valueOf(o.optString("relayVersionState"))
+            }.getOrElse {
+                if (installed) RelayVersionState.UNKNOWN else RelayVersionState.NOT_INSTALLED
+            }
 
             out += InstallServer(
                 id = id,
@@ -2004,7 +3052,10 @@ class InstallServersStore(context: Context) {
                 httpsPort = httpsPort,
                 relayTlsPin = relayTlsPin,
                 adminToken = adminToken,
-                openRooms = openRooms
+                deploymentProfile = deploymentProfile,
+                openRooms = openRooms,
+                relayVersion = relayVersion,
+                relayVersionState = relayVersionState
             )
         }
         return out
@@ -2025,6 +3076,9 @@ class InstallServersStore(context: Context) {
             s.httpsPort?.let { o.put("httpsPort", it) }
             s.relayTlsPin?.let { o.put("relayTlsPin", it) }
             s.adminToken?.let { o.put("adminToken", it) }
+            s.deploymentProfile?.let { o.put("deploymentProfile", deploymentProfileToJson(it)) }
+            s.relayVersion?.let { o.put("relayVersion", it) }
+            o.put("relayVersionState", s.relayVersionState.name)
             o.put("openRooms", openRoomsToJsonArray(s.openRooms))
 
             arr.put(o)

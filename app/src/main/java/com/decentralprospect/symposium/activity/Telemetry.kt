@@ -404,6 +404,7 @@ internal suspend fun MainActivity.performRelayInstallationWithTelemetry(
     login: String,
     password: String,
     expectedSshHostKeyPin: String?,
+    existingProfile: DeploymentProfile?,
     logger: suspend (String) -> Unit
 ): RemoteInstaller.InstallResult {
     relayInstallStartedAtMs = SystemClock.elapsedRealtime()
@@ -422,6 +423,7 @@ internal suspend fun MainActivity.performRelayInstallationWithTelemetry(
             login = login,
             password = password,
             expectedSshHostKeyPin = expectedSshHostKeyPin,
+            existingProfile = existingProfile,
             logger = telemetryLogger
         )
 
