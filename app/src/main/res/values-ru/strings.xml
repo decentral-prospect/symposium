@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Symposium</string>
+    <string name="call_in_progress">Идёт звонок</string>
+    <string name="call_active">Голосовое соединение активно</string>
+    <string name="call_listening">Подключение к звонку активно</string>
+    <string name="open_app">Открыть</string>
+    <string name="calls_channel_name">Звонки</string>
+    <string name="calls_channel_description">Активные голосовые звонки</string>
+</resources>

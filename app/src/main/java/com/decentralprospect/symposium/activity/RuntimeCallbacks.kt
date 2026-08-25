@@ -28,12 +28,12 @@ internal fun CallRuntime.onReconnectTick(runnable: Runnable) {
     if (!reconnectMode) return
 
     if (webSocket != null) {
-        reconnectHandler.postDelayed(runnable, RECONNECT_DELAY_MS)
+        reconnectHandler.postDelayed(runnable, RECONNECT_CONNECT_POLL_MS)
         return
     }
 
-    Log.d(TAG, "Auto-reconnect attempt #$reconnectAttemptCount")
     reconnectAttemptCount++
+    debugLog(TAG, "Auto-reconnect attempt #$reconnectAttemptCount")
     trackRtcEvent(
         name = "reconnect.attempt",
         attrs = nrAttrs(
@@ -43,7 +43,9 @@ internal fun CallRuntime.onReconnectTick(runnable: Runnable) {
     )
     setStatus("reconnecting… ($reconnectAttemptCount)")
     internalConnectWithSavedParams()
-    reconnectHandler.postDelayed(runnable, RECONNECT_DELAY_MS)
+    val nextDelayMs = randomizedReconnectDelayMs(reconnectAttemptCount)
+    diagLog("Schedule next reconnect check", "attempt=$reconnectAttemptCount delayMs=$nextDelayMs")
+    reconnectHandler.postDelayed(runnable, nextDelayMs)
 }
 
 internal fun CallRuntime.createRtcTrackNegotiationController(): RtcTrackNegotiationController {
@@ -127,7 +129,7 @@ internal fun CallRuntime.onStatsTick(runnable: Runnable) {
             }
         }
     } catch (e: Throwable) {
-        Log.w(TAG, "Stats polling error: ${e.message}")
+        diagnosticWarning(TAG, "Stats polling error: ${e.message}")
         trackRtcEvent("rtc.stats.error", nrAttrs("message" to e.message))
     }
 

@@ -32,10 +32,14 @@ internal fun CallRuntime.ensureVideoEnabled() {
             }
         }
 
-        videoEnabledState = true
-        runCatching { localVideoTrack?.setEnabled(true) }
-
         val senderAttached = ensureLocalVideoSenderInternal()
+        check(senderAttached) { "E2EE video sender setup failed" }
+
+        videoEnabledState = true
+        localVideoTrack?.setEnabled(true)
+        check(localVideoTrack?.enabled() == true) {
+            "failed to enable the protected video track"
+        }
 
         VideoTracksStore.setTrack(rtcController.selfPeerId(), localVideoTrack)
 
@@ -54,7 +58,7 @@ internal fun CallRuntime.ensureVideoEnabled() {
         cameraRuntimeState = "error"
         updateCameraDebug("enable-failed:${t.message}")
         setStatus("Camera init failed")
-        Log.e(TAG, "Video enable failed: ${t.message}")
+        diagnosticError(TAG, "Video enable failed: ${t.message}")
     } finally {
         videoStartInProgress = false
     }
@@ -80,6 +84,7 @@ internal fun CallRuntime.createOrAttachVideoTrackInternal() {
 
     if (localVideoTrack == null) {
         localVideoTrack = pcFactory!!.createVideoTrack(nextLocalVideoTrackId(), videoSource)
+        localVideoTrack?.setEnabled(false)
     }
 
     val source = videoSource ?: throw IllegalStateException("videoSource == null")
@@ -88,42 +93,41 @@ internal fun CallRuntime.createOrAttachVideoTrackInternal() {
         startNewCapture(source, sth)
     }
 
-    runCatching { localVideoTrack?.setEnabled(true) }
     VideoTracksStore.setTrack(rtcController.selfPeerId(), localVideoTrack)
     cameraRuntimeState = "capturing"
     updateCameraDebug("capture-ready")
 
-    Log.d(TAG, "Local video track ready: ${localVideoTrack?.id()}")
+    debugLog(TAG, "Local video track ready: ${localVideoTrack?.id()}")
 }
 
 internal fun CallRuntime.cameraEventsHandler() = object : CameraVideoCapturer.CameraEventsHandler {
     override fun onCameraError(errorDescription: String?) {
-        Log.e(TAG, "Camera error: $errorDescription")
+        diagnosticError(TAG, "Camera error: $errorDescription")
         cameraRuntimeState = "error"
         updateCameraDebug("camera-error:${errorDescription.orEmpty()}")
     }
 
     override fun onCameraDisconnected() {
-        Log.w(TAG, "Camera disconnected")
+        diagnosticWarning(TAG, "Camera disconnected")
         cameraRuntimeState = "disconnected"
         updateCameraDebug("camera-disconnected")
     }
 
     override fun onCameraFreezed(errorDescription: String?) {
-        Log.e(TAG, "Camera freezed: $errorDescription")
+        diagnosticError(TAG, "Camera freezed: $errorDescription")
         cameraRuntimeState = "frozen"
         updateCameraDebug("camera-frozen")
     }
 
     override fun onCameraOpening(cameraName: String?) {
-        Log.d(TAG, "Opening camera: $cameraName")
+        debugLog(TAG, "Opening camera: $cameraName")
         activeCapturerName = cameraName
         cameraRuntimeState = "opening"
         updateCameraDebug("opening")
     }
 
     override fun onFirstFrameAvailable() {
-        Log.d(TAG, "First camera frame available")
+        debugLog(TAG, "First camera frame available")
         firstFrameSeen = true
         lastFirstFrameUptimeMs = SystemClock.uptimeMillis()
         cameraRuntimeState = "streaming"
@@ -131,7 +135,7 @@ internal fun CallRuntime.cameraEventsHandler() = object : CameraVideoCapturer.Ca
     }
 
     override fun onCameraClosed() {
-        Log.d(TAG, "Camera closed")
+        debugLog(TAG, "Camera closed")
         cameraRuntimeState = "closed"
         updateCameraDebug("camera-closed")
     }
@@ -219,7 +223,7 @@ internal fun CallRuntime.startNewCapture(source: VideoSource, sth: SurfaceTextur
                     break
                 } catch (e: Throwable) {
                     lastError = e
-                    Log.w(TAG, "startCapture failed ${selection.name} ${w}x${h}@$fps: ${e.message}")
+                    diagnosticWarning(TAG, "startCapture failed ${selection.name} ${w}x${h}@$fps: ${e.message}")
                 }
             }
             if (!started) {
@@ -254,7 +258,7 @@ internal fun CallRuntime.scheduleCameraWatchdog() {
             updateCameraDebug("watchdog-ok")
             return@postDelayed
         }
-        Log.w(TAG, "No first frame detected, restarting capture with alternate camera")
+        diagnosticWarning(TAG, "No first frame detected, restarting capture with alternate camera")
         updateCameraDebug("watchdog-restart")
         runCatching {
             restartCapture(preferOppositeFacing = true)

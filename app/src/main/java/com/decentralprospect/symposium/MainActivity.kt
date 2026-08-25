@@ -10,24 +10,22 @@ import android.os.Build
 import android.os.Bundle
 import android.os.IBinder
 import android.util.Log
-import androidx.activity.ComponentActivity
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
+import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.ContextCompat
 import java.util.UUID
 
-class MainActivity : ComponentActivity() {
+class MainActivity : AppCompatActivity() {
 
     internal val remoteInstaller by lazy { RemoteInstaller(applicationContext) }
 
     internal var telemetryEnabledState by mutableStateOf(false)
     internal var telemetryPromptShownState by mutableStateOf(false)
     internal var appThemeModeState by mutableStateOf(AppThemeMode.SYSTEM)
-    internal var newRelicStarted = false
-    internal var newRelicShutdownInThisProcess = false
-
+    internal var appLanguageState by mutableStateOf(AppLanguage.SYSTEM)
     internal var relayInstallStartedAtMs = 0L
     internal var relayInstallLastStage = "not_started"
 
@@ -71,7 +69,8 @@ class MainActivity : ComponentActivity() {
         val room: String,
         val username: String,
         val tlsPin: String,
-        val modKey: String
+        val modKey: String,
+        val e2eeSecret: String
     )
 
     private val permissionRequester = object : CallPermissionRequester {
@@ -101,6 +100,9 @@ class MainActivity : ComponentActivity() {
             boundCallService = callService
             callServiceBound = true
             val runtime = callService.runtime
+            // Consent can be changed while binding is still in progress. Reload it before the
+            // runtime starts handling a pending connection so diagnostics cannot stay stale.
+            runtime.loadTelemetryPrivacyPrefs()
             runtime.attachPermissionRequester(permissionRequester)
             callRuntimeState = runtime
             pendingUiBinder?.let { binder ->
@@ -109,7 +111,14 @@ class MainActivity : ComponentActivity() {
             }
             pendingConnect?.let { pending ->
                 pendingConnect = null
-                runtime.connect(pending.url, pending.room, pending.username, pending.tlsPin, pending.modKey)
+                runtime.connect(
+                    pending.url,
+                    pending.room,
+                    pending.username,
+                    pending.tlsPin,
+                    pending.modKey,
+                    pending.e2eeSecret
+                )
             }
         }
 
@@ -136,7 +145,7 @@ class MainActivity : ComponentActivity() {
     internal val requestPostNotifications = registerForActivityResult(
         ActivityResultContracts.RequestPermission()
     ) { granted ->
-        Log.d(TAG, "POST_NOTIFICATIONS granted=$granted")
+        debugLog(TAG, "POST_NOTIFICATIONS granted=$granted")
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -147,6 +156,7 @@ class MainActivity : ComponentActivity() {
     override fun onStart() {
         super.onStart()
         ensureCallServiceBound()
+        callRuntimeState?.attachPermissionRequester(permissionRequester)
     }
 
     override fun onNewIntent(intent: Intent) {
@@ -196,13 +206,14 @@ class MainActivity : ComponentActivity() {
         room: String,
         username: String,
         tlsPin: String,
-        modKey: String
+        modKey: String,
+        e2eeSecret: String
     ) {
         val runtime = callRuntimeState
         if (runtime != null) {
-            runtime.connect(url, room, username, tlsPin, modKey)
+            runtime.connect(url, room, username, tlsPin, modKey, e2eeSecret)
         } else {
-            pendingConnect = PendingConnect(url, room, username, tlsPin, modKey)
+            pendingConnect = PendingConnect(url, room, username, tlsPin, modKey, e2eeSecret)
             ensureCallServiceBound()
         }
     }

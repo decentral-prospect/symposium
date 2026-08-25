@@ -21,6 +21,6 @@ internal fun MainActivity.setAppThemeMode(mode: AppThemeMode, showToast: Boolean
         .apply()
 
     if (showToast) {
-        Toast.makeText(this, "Тема: ${mode.label}", Toast.LENGTH_SHORT).show()
+        Toast.makeText(this, tr("Тема: ${mode.label}"), Toast.LENGTH_SHORT).show()
     }
 }

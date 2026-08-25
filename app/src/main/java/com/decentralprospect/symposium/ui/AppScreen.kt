@@ -26,15 +26,17 @@ import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
+import androidx.compose.material.icons.outlined.Home
+import androidx.compose.material.icons.outlined.Settings
 import androidx.compose.material.icons.filled.GridView
-import androidx.compose.material.icons.filled.Home
 import androidx.compose.material.icons.filled.Info
-import androidx.compose.material.icons.filled.Menu
+import androidx.compose.material.icons.filled.KeyboardArrowDown
+import androidx.compose.material.icons.filled.KeyboardArrowUp
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
-import androidx.compose.material3.Text
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
@@ -59,7 +61,6 @@ import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -78,12 +79,14 @@ internal fun AppScreen(
     telemetryEnabled: Boolean = false,
     telemetryPromptShown: Boolean = true,
     themeMode: AppThemeMode = AppThemeMode.SYSTEM,
+    appLanguage: AppLanguage = AppLanguage.SYSTEM,
     onThemeModeChange: (AppThemeMode) -> Unit = {},
+    onAppLanguageChange: (AppLanguage) -> Unit = {},
     onTelemetryConsentResult: (Boolean) -> Unit = {},
     onTelemetryEnabledChange: (Boolean) -> Unit = {},
     onRequestBind: (UiBinder) -> Unit,
     initialConnectLink: String? = null,
-    onConnect: (String, String, String, String, String) -> Unit,
+    onConnect: (String, String, String, String, String, String) -> Unit,
     onCancelReconnect: () -> Unit,
     onDisconnect: () -> Unit,
     onToggleSpeaker: () -> Boolean,
@@ -103,6 +106,7 @@ internal fun AppScreen(
     onObserveSshHostKeyPin: suspend (ip: String) -> String,
     onProbeServer: suspend (ip: String, login: String, password: String, expectedSshHostKeyPin: String?) -> RemoteInstaller.ProbeResult,
     onSetRoomOpenState: suspend (ip: String, httpsPort: Int?, relayTlsPin: String?, adminToken: String?, roomName: String, open: Boolean) -> RemoteInstaller.RoomAdminResult,
+    onRotateModeratorKey: suspend (ip: String, httpsPort: Int?, relayTlsPin: String?, adminToken: String?, roomName: String) -> RemoteInstaller.RoomAdminResult,
     onFetchOpenRooms: suspend (ip: String, httpsPort: Int?, relayTlsPin: String?, adminToken: String?) -> RemoteInstaller.RoomAdminResult,
     onFetchRelayVersion: suspend (ip: String, httpsPort: Int?, relayTlsPin: String?, adminToken: String?) -> RemoteInstaller.RelayVersionResult,
     onSetHandRaised: (Boolean) -> Unit = {},
@@ -127,9 +131,12 @@ internal fun AppScreen(
 
     var connectLink by remember { mutableStateOf("") }
     var usernameInput by remember { mutableStateOf("") }
+    var connectingToRoom by remember { mutableStateOf(false) }
+    var connectingRoomName by remember { mutableStateOf("") }
 
     val homeScope = rememberCoroutineScope()
     val homeServersStore = remember(context) { InstallServersStore(context) }
+    val conferenceE2eeSecrets = remember(context) { ConferenceE2eeSecretStore(context) }
     val homeServers = remember { mutableStateListOf<InstallServer>() }
     var homeServersLoaded by remember { mutableStateOf(false) }
     var showConnectDialog by remember { mutableStateOf(false) }
@@ -159,6 +166,7 @@ internal fun AppScreen(
     var selectedHomeMeetingServerId by remember { mutableStateOf<String?>(null) }
     var selectedHomeMeetingRoomName by remember { mutableStateOf<String?>(null) }
     var confirmHomeCloseMeeting by remember { mutableStateOf(false) }
+    var confirmHomeModeratorLinkRotation by remember { mutableStateOf(false) }
     var homeServersRefreshing by remember { mutableStateOf(false) }
 
     var status by remember { mutableStateOf("offline") }
@@ -238,7 +246,7 @@ internal fun AppScreen(
     fun copyHomeValue(label: String, value: String) {
         val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
         clipboard.setPrimaryClip(ClipData.newPlainText(label, value))
-        Toast.makeText(context, "Скопировано", Toast.LENGTH_SHORT).show()
+        Toast.makeText(context, tr("Скопировано"), Toast.LENGTH_SHORT).show()
     }
 
     fun clearHomeAddServerForm() {
@@ -560,7 +568,7 @@ internal fun AppScreen(
             selectedHomeCreateServerId = server.id
             homeCreateRoomName = ""
             homeRoomError = null
-            Toast.makeText(context, "SymposiumRelay установлен", Toast.LENGTH_SHORT).show()
+            Toast.makeText(context, tr("SymposiumRelay установлен"), Toast.LENGTH_SHORT).show()
         }
     }
 
@@ -603,6 +611,8 @@ internal fun AppScreen(
                 )
             }
 
+            conferenceE2eeSecrets.rotate(server.ip, server.httpsPort, roomName)
+
             homeRoomLoading = false
             showCreateMeetingDialog = false
             selectedHomeCreateServerId = null
@@ -620,7 +630,7 @@ internal fun AppScreen(
             }
 
             val roomResult = result.getOrElse {
-                Toast.makeText(context, it.message ?: "Не удалось закрыть комнату", Toast.LENGTH_SHORT).show()
+                Toast.makeText(context, tr(it.message ?: "Не удалось закрыть комнату"), Toast.LENGTH_SHORT).show()
                 homeRoomLoading = false
                 return@launch
             }
@@ -635,6 +645,8 @@ internal fun AppScreen(
                 )
             }
 
+            conferenceE2eeSecrets.remove(server.ip, server.httpsPort, room.name)
+
             homeRoomLoading = false
             selectedHomeMeetingServerId = null
             selectedHomeMeetingRoomName = null
@@ -642,27 +654,85 @@ internal fun AppScreen(
         }
     }
 
+    fun rotateHomeModeratorLink(server: InstallServer, room: OpenRoomInfo) {
+        if (homeRoomLoading) return
+        homeRoomLoading = true
+        homeScope.launch {
+            val result = runCatching {
+                onRotateModeratorKey(
+                    server.ip,
+                    server.httpsPort,
+                    server.relayTlsPin,
+                    server.adminToken,
+                    room.name
+                )
+            }
+
+            val roomResult = result.getOrElse {
+                Toast.makeText(context, tr(it.message ?: "Не удалось обновить ссылку модератора"), Toast.LENGTH_SHORT).show()
+                homeRoomLoading = false
+                confirmHomeModeratorLinkRotation = false
+                return@launch
+            }
+
+            updateHomeServer(server.id) { current ->
+                current.copy(
+                    openRooms = roomResult.openRooms,
+                    relayTlsPin = roomResult.relayInfo?.pin ?: current.relayTlsPin,
+                    httpsPort = roomResult.relayInfo?.httpsPort ?: current.httpsPort,
+                    adminToken = roomResult.relayInfo?.adminToken ?: current.adminToken
+                )
+            }
+
+            homeRoomLoading = false
+            confirmHomeModeratorLinkRotation = false
+            Toast.makeText(context, tr("Ссылка модератора обновлена"), Toast.LENGTH_SHORT).show()
+        }
+    }
+
     fun homeGuestLink(server: InstallServer, room: OpenRoomInfo): String? {
         val pin = server.relayTlsPin?.trim()
         if (pin.isNullOrBlank()) return null
-        return buildConnectHttpRedirectLink(server.ip, server.httpsPort, room.name, pin)
+        val e2eeSecret = conferenceE2eeSecrets.getOrCreate(server.ip, server.httpsPort, room.name)
+        return buildConnectHttpRedirectLink(server.ip, server.httpsPort, room.name, pin, e2eeSecret)
     }
 
     fun homeGuestQrLink(server: InstallServer, room: OpenRoomInfo): String? {
         val pin = server.relayTlsPin?.trim()
         if (pin.isNullOrBlank()) return null
-        return buildConnectDeepLink(server.ip, server.httpsPort, room.name, pin)
+        val e2eeSecret = conferenceE2eeSecrets.getOrCreate(server.ip, server.httpsPort, room.name)
+        return buildConnectDeepLink(server.ip, server.httpsPort, room.name, pin, e2eeSecret)
     }
 
     fun homeModeratorLink(server: InstallServer, room: OpenRoomInfo): String? {
         val pin = server.relayTlsPin?.trim()
         val modKey = room.moderatorKey.trim()
         if (pin.isNullOrBlank() || modKey.isBlank()) return null
-        return buildConnectDeepLink(server.ip, server.httpsPort, room.name, pin, moderatorKey = modKey)
+        val e2eeSecret = conferenceE2eeSecrets.getOrCreate(server.ip, server.httpsPort, room.name)
+        return buildConnectDeepLink(
+            server.ip,
+            server.httpsPort,
+            room.name,
+            pin,
+            e2eeSecret,
+            moderatorKey = modKey
+        )
     }
 
     fun showMissingLinkDataError() {
-        Toast.makeText(context, "Нет TLS pin или moderator_key", Toast.LENGTH_SHORT).show()
+        Toast.makeText(context, tr("Нет TLS pin или moderator_key"), Toast.LENGTH_SHORT).show()
+    }
+
+    fun cancelPendingRoomConnection() {
+        connectingToRoom = false
+        connectingRoomName = ""
+        inCallUi = false
+        showConnectDialog = true
+        if (reconnectMode) {
+            onCancelReconnect()
+        } else {
+            onDisconnect()
+        }
     }
 
     LaunchedEffect(initialAccessibilityFontScale) {
@@ -680,6 +750,11 @@ internal fun AppScreen(
     BackHandler {
         when {
             moderatorPanelOpen -> moderatorPanelOpen = false
+            connectingToRoom -> cancelPendingRoomConnection()
+            showConnectDialog -> {
+                showConnectDialog = false
+                clearConnectForm()
+            }
             currentScreen == RootScreen.MENU -> currentScreen = RootScreen.HOME
             currentScreen != RootScreen.HOME -> currentScreen = RootScreen.MENU
             else -> {
@@ -688,7 +763,7 @@ internal fun AppScreen(
                     (context as? Activity)?.finish()
                 } else {
                     lastBackPressAt = now
-                    Toast.makeText(context, "Нажмите ещё раз, чтобы выйти", Toast.LENGTH_SHORT).show()
+                    Toast.makeText(context, tr("Нажмите ещё раз, чтобы выйти"), Toast.LENGTH_SHORT).show()
                 }
             }
         }
@@ -697,7 +772,16 @@ internal fun AppScreen(
     val uiStateBinder = remember {
         object : UiBinder {
             override fun setStatus(s: String) { mainHandler.post { status = s } }
-            override fun setConnected(on: Boolean) { mainHandler.post { connected = on } }
+            override fun setConnected(on: Boolean) {
+                mainHandler.post {
+                    connected = on
+                    if (on) {
+                        connectingToRoom = false
+                        connectingRoomName = ""
+                        clearConnectForm()
+                    }
+                }
+            }
             override fun setMic(on: Boolean) { mainHandler.post { micEnabled = on } }
             override fun setVideo(on: Boolean) { mainHandler.post { videoEnabled = on } }
             override fun setOutput(on: Boolean) { mainHandler.post { outputOn = on } }
@@ -757,6 +841,9 @@ internal fun AppScreen(
                 mainHandler.post {
                     lobbyWaiting = waiting
                     if (waiting) {
+                        connectingToRoom = false
+                        connectingRoomName = ""
+                        clearConnectForm()
                         inCallUi = false
                         connected = false
                     }
@@ -838,12 +925,12 @@ internal fun AppScreen(
         }
     }
 
-    LaunchedEffect(connected, reconnectMode) {
-        if (connected || reconnectMode) {
+    LaunchedEffect(connected, reconnectMode, connectingToRoom, showConnectDialog) {
+        if (connected || (reconnectMode && !connectingToRoom && !showConnectDialog)) {
             lobbyWaiting = false
             inCallUi = true
         }
-        if (!connected && !reconnectMode && !lobbyWaiting) {
+        if (!connected && !reconnectMode && !lobbyWaiting && !connectingToRoom) {
             inCallUi = false
             pinnedPeerId = null
             moderatorPanelOpen = false
@@ -901,6 +988,7 @@ internal fun AppScreen(
         if (!initialConnectLink.isNullOrBlank()) {
             connectLink = initialConnectLink
             usernameInput = parseConnectLink(initialConnectLink)?.username.orEmpty()
+            currentScreen = RootScreen.HOME
             showConnectDialog = true
         }
     }
@@ -912,35 +1000,6 @@ internal fun AppScreen(
         ),
         LocalAccessibilityFontScale provides accessibilityFontScale
     ) {
-        if (showConnectDialog) {
-            HomeConnectDialog(
-                connectLink = connectLink,
-                onConnectLinkChange = { connectLink = it },
-                username = usernameInput,
-                onUsernameChange = { usernameInput = it },
-                parsed = parsedConnectLink,
-                reconnectMode = reconnectMode,
-                onDismiss = {
-                    showConnectDialog = false
-                    clearConnectForm()
-                },
-                onConnect = {
-                    parsedConnectLink?.let { payload ->
-                        val finalUsername = usernameInput.trim().ifBlank { payload.username.trim() }
-                        showConnectDialog = false
-                        clearConnectForm()
-                        onConnect(
-                            payload.ip,
-                            payload.room,
-                            finalUsername,
-                            payload.tlsPin,
-                            payload.moderatorKey
-                        )
-                    }
-                }
-            )
-        }
-
         if (showCreateMeetingDialog) {
             HomeCreateMeetingDialog(
                 servers = homeServers,
@@ -1071,11 +1130,13 @@ internal fun AppScreen(
                         homeQrDialogLink = link
                     }
                 },
+                onRotateModeratorLink = { confirmHomeModeratorLinkRotation = true },
                 onCloseMeeting = { confirmHomeCloseMeeting = true },
                 onDismiss = {
                     selectedHomeMeetingServerId = null
                     selectedHomeMeetingRoomName = null
                     confirmHomeCloseMeeting = false
+                    confirmHomeModeratorLinkRotation = false
                 }
             )
         }
@@ -1102,6 +1163,34 @@ internal fun AppScreen(
                             confirmHomeCloseMeeting = false
                             closeHomeMeeting(server, room)
                         },
+                        kind = ActionButtonKind.DANGER,
+                        enabled = !homeRoomLoading,
+                        loading = homeRoomLoading,
+                        modifier = Modifier.weight(1f)
+                    )
+                }
+            )
+        }
+
+        if (confirmHomeModeratorLinkRotation && selectedHomeMeetingServer != null && selectedHomeMeetingRoom != null) {
+            val server = selectedHomeMeetingServer
+            val room = selectedHomeMeetingRoom
+            AppDialog(
+                title = "Обновить ссылку модератора?",
+                onDismiss = { confirmHomeModeratorLinkRotation = false },
+                dismissEnabled = !homeRoomLoading,
+                content = {
+                    Text(
+                        text = "Старая ссылка перестанет работать. Активные модераторы комнаты \"${room.name}\" будут отключены; гости останутся в комнате.",
+                        color = appTextPrimaryColor(),
+                        fontSize = 14.sp,
+                        lineHeight = 19.sp
+                    )
+                },
+                actions = {
+                    ActionButton(
+                        label = "Обновить ссылку",
+                        onClick = { rotateHomeModeratorLink(server, room) },
                         kind = ActionButtonKind.DANGER,
                         enabled = !homeRoomLoading,
                         loading = homeRoomLoading,
@@ -1186,15 +1275,48 @@ internal fun AppScreen(
                             }
                         }
                     )
+                } else if (
+                    currentScreen == RootScreen.HOME &&
+                    (connectingToRoom || lobbyWaiting)
+                ) {
+                    Unit
                 } else {
                     MinimalBottomNav(
                         menuActive = currentScreen != RootScreen.HOME,
-                        onHome = { currentScreen = RootScreen.HOME },
-                        onMenu = { currentScreen = RootScreen.MENU }
+                        onHome = {
+                            currentScreen = RootScreen.HOME
+                            if (showConnectDialog) {
+                                showConnectDialog = false
+                                clearConnectForm()
+                            }
+                        },
+                        onMenu = {
+                            if (showConnectDialog) {
+                                showConnectDialog = false
+                                clearConnectForm()
+                            }
+                            currentScreen = RootScreen.MENU
+                        }
                     )
                 }
             }
         ) { inner ->
+
+            if (connectingToRoom && currentScreen == RootScreen.HOME) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .padding(inner)
+                        .background(appBackgroundColor())
+                ) {
+                    ConnectingRoomView(
+                        roomName = connectingRoomName,
+                        status = status,
+                        onCancel = { cancelPendingRoomConnection() }
+                    )
+                }
+                return@Scaffold
+            }
 
             if (lobbyWaiting && currentScreen == RootScreen.HOME) {
                 Box(
@@ -1335,27 +1457,67 @@ internal fun AppScreen(
             ) {
                 when (currentScreen) {
                     RootScreen.HOME -> {
-                        LazyColumn(
-                            modifier = Modifier.fillMaxSize(),
-                            verticalArrangement = Arrangement.spacedBy(14.dp),
-                            contentPadding = PaddingValues(bottom = 28.dp)
-                        ) {
-                            item {
-                                HomeMainScreen(
-                                    servers = homeServers,
-                                    reconnectMode = reconnectMode,
-                                    roomsRefreshing = homeServersRefreshing,
-                                    onOpenConnect = { showConnectDialog = true },
-                                    onOpenCreateMeeting = {
-                                        showCreateMeetingDialog = true
-                                        refreshHomeServers()
-                                    },
-                                    onRefreshRooms = { refreshHomeServers() },
-                                    onMeetingClick = { server, room ->
-                                        selectedHomeMeetingServerId = server.id
-                                        selectedHomeMeetingRoomName = room.name
+                        if (showConnectDialog) {
+                            HomeConnectScreen(
+                                connectLink = connectLink,
+                                onConnectLinkChange = { connectLink = it },
+                                username = usernameInput,
+                                onUsernameChange = { usernameInput = it },
+                                parsed = parsedConnectLink,
+                                reconnectMode = reconnectMode,
+                                onConnect = {
+                                    parsedConnectLink?.let { payload ->
+                                        val finalUsername = usernameInput.trim().ifBlank { payload.username.trim() }
+                                        conferenceE2eeSecrets.save(
+                                            payload.ip,
+                                            null,
+                                            payload.room,
+                                            payload.e2eeSecret
+                                        )
+                                        showConnectDialog = false
+                                        connectingToRoom = true
+                                        connectingRoomName = payload.room
+                                        status = "connecting…"
+                                        inCallUi = false
+                                        onConnect(
+                                            payload.ip,
+                                            payload.room,
+                                            finalUsername,
+                                            payload.tlsPin,
+                                            payload.moderatorKey,
+                                            payload.e2eeSecret
+                                        )
                                     }
-                                )
+                                }
+                            )
+                        } else {
+                            LazyColumn(
+                                modifier = Modifier.fillMaxSize(),
+                                verticalArrangement = Arrangement.spacedBy(14.dp),
+                                contentPadding = PaddingValues(bottom = 28.dp)
+                            ) {
+                                item {
+                                    HomeMainScreen(
+                                        servers = homeServers,
+                                        reconnectMode = reconnectMode,
+                                        roomsRefreshing = homeServersRefreshing,
+                                        onOpenConnect = {
+                                            showCreateMeetingDialog = false
+                                            showConnectDialog = true
+                                        },
+                                        onOpenCreateMeeting = {
+                                            showConnectDialog = false
+                                            showCreateMeetingDialog = true
+                                            refreshHomeServers()
+                                        },
+                                        onRefreshRooms = { refreshHomeServers() },
+                                        onMeetingClick = { server, room ->
+                                            selectedHomeMeetingServerId = server.id
+                                            selectedHomeMeetingRoomName = room.name
+                                        },
+                                        modifier = Modifier.fillParentMaxHeight()
+                                    )
+                                }
                             }
                         }
                     }
@@ -1380,6 +1542,7 @@ internal fun AppScreen(
                             onObserveSshHostKeyPin = onObserveSshHostKeyPin,
                             onProbeServer = onProbeServer,
                             onSetRoomOpenState = onSetRoomOpenState,
+                            onRotateModeratorKey = onRotateModeratorKey,
                             onFetchOpenRooms = onFetchOpenRooms,
                             onFetchRelayVersion = onFetchRelayVersion
                         )
@@ -1389,6 +1552,8 @@ internal fun AppScreen(
                         SettingsScreen(
                             themeMode = themeMode,
                             onThemeModeChange = onThemeModeChange,
+                            appLanguage = appLanguage,
+                            onAppLanguageChange = onAppLanguageChange,
                             telemetryEnabled = telemetryEnabled,
                             onTelemetryEnabledChange = onTelemetryEnabledChange,
                             accessibilityFontScale = accessibilityFontScale,
@@ -1425,33 +1590,26 @@ internal fun MinimalBottomNav(
     onHome: () -> Unit,
     onMenu: () -> Unit
 ) {
-    val navShape = RoundedCornerShape(topStart = 26.dp, topEnd = 26.dp)
+    val navShape = RoundedCornerShape(topStart = 22.dp, topEnd = 22.dp)
 
     Surface(
-        color = appSurfaceColor(),
+        color = appBottomNavColor(),
         tonalElevation = 0.dp,
         shadowElevation = 0.dp,
         modifier = Modifier
             .fillMaxWidth()
-            .padding(top = 8.dp)
             .clip(navShape)
     ) {
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .border(1.dp, appBorderColor(0.95f), navShape)
-                .padding(start = 12.dp, top = 8.dp, end = 12.dp, bottom = 10.dp),
+                .border(1.dp, appGrayControlBorderColor(0.55f), navShape)
+                .padding(horizontal = 18.dp, vertical = 8.dp),
             horizontalArrangement = Arrangement.SpaceEvenly,
             verticalAlignment = Alignment.CenterVertically
         ) {
-            NavIconButton(active = !menuActive, icon = Icons.Filled.Home, label = "Главная", onClick = onHome, modifier = Modifier.weight(1f))
-            Box(
-                modifier = Modifier
-                    .width(1.dp)
-                    .size(width = 1.dp, height = 64.dp)
-                    .background(appBorderColor(0.55f))
-            )
-            NavIconButton(active = menuActive, icon = Icons.Filled.Menu, label = "Меню", onClick = onMenu, modifier = Modifier.weight(1f))
+            NavIconButton(active = !menuActive, icon = Icons.Outlined.Home, label = "Главная", onClick = onHome, modifier = Modifier.weight(1f))
+            NavIconButton(active = menuActive, icon = Icons.Outlined.Settings, label = "Настройки", onClick = onMenu, modifier = Modifier.weight(1f))
         }
     }
 }
@@ -1460,38 +1618,30 @@ internal fun MinimalBottomNav(
 internal fun NavIconButton(active: Boolean, icon: ImageVector, label: String, onClick: () -> Unit, modifier: Modifier = Modifier) {
     Column(
         modifier = modifier
-            .heightIn(min = 78.dp)
-            .padding(vertical = 4.dp)
-            .clip(RoundedCornerShape(18.dp))
+            .heightIn(min = 62.dp)
+            .clip(AppButtonShape)
             .semantics {
                 role = Role.Button
-                contentDescription = label
-                stateDescription = if (active) "Выбрано" else "Не выбрано"
+                contentDescription = tr(label)
+                stateDescription = tr(if (active) "Выбрано" else "Не выбрано")
             }
             .clickable(role = Role.Button, onClick = onClick),
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.Center
     ) {
-        Box(
-            modifier = Modifier
-                .width(38.dp)
-                .height(3.dp)
-                .clip(RoundedCornerShape(999.dp))
-                .background(if (active) AppAccent else Color.Transparent)
-        )
-        Spacer(Modifier.size(7.dp))
         Icon(
             imageVector = icon,
             contentDescription = null,
             tint = if (active) AppAccent else appTextMutedColor(),
-            modifier = Modifier.size(28.dp)
+            modifier = Modifier.size(22.dp)
         )
-        Spacer(Modifier.size(4.dp))
+        Spacer(Modifier.size(3.dp))
         Text(
             text = label,
             color = if (active) AppAccent else appTextMutedColor(),
-            fontSize = 13.sp,
-            lineHeight = 19.sp,
+            fontSize = 12.sp,
+            lineHeight = 16.sp,
+            fontWeight = FontWeight.Medium,
             maxLines = 1,
             overflow = TextOverflow.Ellipsis
         )
@@ -1519,6 +1669,12 @@ internal fun TelemetryConsentDialog(
                 fontSize = 13.sp,
                 lineHeight = 18.sp
             )
+            Text(
+                text = "Независимо от выбора отправляются только факт установки, запуски приложения, ежедневный сигнал установленности и изменения этого разрешения.",
+                color = appTextSecondaryColor(),
+                fontSize = 12.sp,
+                lineHeight = 17.sp
+            )
         },
         actions = {
             ActionButton(
@@ -1535,177 +1691,214 @@ internal fun TelemetryConsentDialog(
 internal fun SettingsScreen(
     themeMode: AppThemeMode,
     onThemeModeChange: (AppThemeMode) -> Unit,
+    appLanguage: AppLanguage,
+    onAppLanguageChange: (AppLanguage) -> Unit,
     telemetryEnabled: Boolean,
     onTelemetryEnabledChange: (Boolean) -> Unit,
     accessibilityFontScale: AccessibilityFontScale,
     onAccessibilityFontScaleChange: (AccessibilityFontScale) -> Unit
 ) {
+    val themeOptions = AppThemeMode.values()
+    val languageOptions = AppLanguage.values()
+    val fontScaleOptions = AccessibilityFontScale.values()
+
     LazyColumn(
         modifier = Modifier.fillMaxSize(),
-        verticalArrangement = Arrangement.spacedBy(14.dp),
-        contentPadding = PaddingValues(bottom = 28.dp)
+        verticalArrangement = Arrangement.spacedBy(10.dp),
+        contentPadding = PaddingValues(bottom = 20.dp)
     ) {
         item {
-            SectionCard(
+            SettingsDropdownCard(
                 title = "Тема",
-                subtitle = "По умолчанию используется тема системы"
-            ) {
-                AppThemeMode.values().forEach { mode ->
-                    SettingsOptionRow(
-                        title = mode.label,
-                        subtitle = mode.talkBackLabel,
-                        selected = themeMode == mode,
-                        role = Role.RadioButton,
-                        onClick = { onThemeModeChange(mode) }
-                    )
-                }
-            }
+                selectedValue = themeMode.label,
+                options = themeOptions.map { it.label },
+                selectedIndex = themeOptions.indexOf(themeMode),
+                onSelect = { onThemeModeChange(themeOptions[it]) }
+            )
         }
 
         item {
-            SectionCard(
+            SettingsDropdownCard(
+                title = "Язык",
+                selectedValue = appLanguage.label,
+                options = languageOptions.map { it.label },
+                selectedIndex = languageOptions.indexOf(appLanguage),
+                onSelect = { onAppLanguageChange(languageOptions[it]) }
+            )
+        }
+
+        item {
+            SettingsDropdownCard(
                 title = "Размер шрифта",
-                subtitle = ""
-            ) {
-
-                AccessibilityFontScale.values().forEach { scale ->
-                    SettingsOptionRow(
-                        title = scale.label,
-                        subtitle = scale.talkBackLabel,
-                        selected = accessibilityFontScale == scale,
-                        role = Role.RadioButton,
-                        onClick = { onAccessibilityFontScaleChange(scale) }
-                    )
-                }
-            }
+                selectedValue = accessibilityFontScale.label,
+                options = fontScaleOptions.map { it.label },
+                selectedIndex = fontScaleOptions.indexOf(accessibilityFontScale),
+                onSelect = { onAccessibilityFontScaleChange(fontScaleOptions[it]) }
+            )
         }
 
         item {
-            SectionCard(
-                title = "Приватность",
-                subtitle = "Управление внешней диагностикой"
-            ) {
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .clip(InnerCardShape)
-                        .background(appSurfaceElevatedColor())
-                        .border(1.dp, appBorderColor(), InnerCardShape)
-                        .semantics(mergeDescendants = true) {
-                            role = Role.Switch
-                            stateDescription = if (telemetryEnabled) "Включено" else "Выключено"
-                        }
-                        .padding(horizontal = 12.dp, vertical = 12.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.SpaceBetween
-                ) {
-                    Column(
-                        modifier = Modifier.weight(1f),
-                        verticalArrangement = Arrangement.spacedBy(5.dp)
-                    ) {
-                        Text(
-                            text = "Анонимная диагностика",
-                            color = appTextPrimaryColor(),
-                            fontWeight = FontWeight.SemiBold,
-                            fontSize = 15.sp
-                        )
-                        Text(
-                            text = "Отправляет только важные технические события: длительность подключения, высокий ping, ошибки WebRTC и итог установки сервера.",
-                            color = appTextSecondaryColor(),
-                            fontSize = 12.sp,
-                            lineHeight = 17.sp
-                        )
-                        Text(
-                            text = "Персональные данные не отправляются",
-                            color = appTextSecondaryColor(),
-                            fontSize = 12.sp,
-                            lineHeight = 17.sp
-                        )
-                    }
-
-                    Spacer(Modifier.width(12.dp))
-
-                    androidx.compose.material3.Switch(
-                        checked = telemetryEnabled,
-                        onCheckedChange = onTelemetryEnabledChange,
-                        colors = androidx.compose.material3.SwitchDefaults.colors(
-                            checkedThumbColor = Color.White,
-                            checkedTrackColor = AppAccent,
-                            checkedBorderColor = AppAccent,
-                            uncheckedThumbColor = appTextSecondaryColor(),
-                            uncheckedTrackColor = appSurfaceElevatedColor(),
-                            uncheckedBorderColor = appBorderColor()
-                        )
-                    )
-                }
-            }
+            SettingsToggleCard(
+                title = "Анонимная диагностика",
+                checked = telemetryEnabled,
+                onCheckedChange = onTelemetryEnabledChange
+            )
         }
     }
 }
 
 @Composable
-internal fun SettingsOptionRow(
+private fun SettingsToggleCard(
     title: String,
-    subtitle: String,
-    selected: Boolean,
-    role: Role,
-    onClick: () -> Unit
+    checked: Boolean,
+    onCheckedChange: (Boolean) -> Unit
 ) {
-    val accent = accessibleAccentColor()
-    val borderColor = if (selected) accent else appBorderColor()
-    val backgroundColor = if (selected) accent.copy(alpha = 0.14f) else appSurfaceElevatedColor()
-
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .clip(InnerCardShape)
-            .background(backgroundColor)
-            .border(1.dp, borderColor, InnerCardShape)
-            .semantics(mergeDescendants = true) {
-                this.role = role
-                stateDescription = if (selected) "Выбрано" else "Не выбрано"
-            }
-            .clickable(role = role, onClick = onClick)
-            .padding(horizontal = 12.dp, vertical = 12.dp),
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.SpaceBetween
+    Surface(
+        modifier = Modifier.fillMaxWidth(),
+        color = appSurfaceElevatedColor(),
+        shape = CardShape,
+        tonalElevation = 0.dp,
+        shadowElevation = 0.dp
     ) {
-        Column(
-            modifier = Modifier.weight(1f),
-            verticalArrangement = Arrangement.spacedBy(4.dp)
+        Row(
+            modifier = Modifier
+                .heightIn(min = 60.dp)
+                .border(1.dp, appGrayControlBorderColor(), CardShape)
+                .semantics(mergeDescendants = true) {
+                    role = Role.Switch
+                    stateDescription = tr(if (checked) "Включено" else "Выключено")
+                }
+                .clickable(role = Role.Switch) { onCheckedChange(!checked) }
+                .padding(horizontal = 16.dp, vertical = 8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.SpaceBetween
         ) {
             Text(
                 text = title,
                 color = appTextPrimaryColor(),
-                fontWeight = FontWeight.SemiBold,
-                fontSize = 15.sp
+                fontSize = 15.sp,
+                lineHeight = 20.sp,
+                fontWeight = FontWeight.Medium,
+                modifier = Modifier.weight(1f)
             )
-            Text(
-                text = subtitle,
-                color = appTextSecondaryColor(),
-                fontSize = 12.sp,
-                lineHeight = 17.sp
+            Spacer(Modifier.width(14.dp))
+            androidx.compose.material3.Switch(
+                checked = checked,
+                onCheckedChange = onCheckedChange,
+                colors = androidx.compose.material3.SwitchDefaults.colors(
+                    checkedThumbColor = Color.White,
+                    checkedTrackColor = AppAccent,
+                    checkedBorderColor = AppAccent,
+                    uncheckedThumbColor = appTextSecondaryColor(),
+                    uncheckedTrackColor = appSurfaceColor(),
+                    uncheckedBorderColor = appFieldBorderColor()
+                )
             )
         }
+    }
+}
 
-        Spacer(Modifier.width(12.dp))
+@Composable
+private fun SettingsDropdownCard(
+    title: String,
+    selectedValue: String,
+    options: List<String>,
+    selectedIndex: Int,
+    onSelect: (Int) -> Unit
+) {
+    var expanded by remember { mutableStateOf(false) }
 
-        Box(
-            modifier = Modifier
-                .size(34.dp)
-                .clip(RoundedCornerShape(10.dp))
-                .background(if (selected) accent else appSurfaceElevatedColor())
-                .border(1.dp, if (selected) accent else appBorderColor(), RoundedCornerShape(10.dp)),
-            contentAlignment = Alignment.Center
+    Surface(
+        modifier = Modifier.fillMaxWidth(),
+        color = appSurfaceElevatedColor(),
+        shape = CardShape,
+        tonalElevation = 0.dp,
+        shadowElevation = 0.dp
+    ) {
+        Column(
+            modifier = Modifier.border(1.dp, appGrayControlBorderColor(), CardShape)
         ) {
-            Text(
-                text = if (selected) "✓" else "",
-                color = AppOnAccent,
-                fontSize = 20.sp,
-                lineHeight = 20.sp,
-                fontWeight = FontWeight.Bold,
-                textAlign = TextAlign.Center
-            )
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .heightIn(min = 60.dp)
+                    .semantics(mergeDescendants = true) {
+                        role = Role.Button
+                        stateDescription = tr(if (expanded) "Развернуто" else "Свернуто")
+                    }
+                    .clickable(role = Role.Button) { expanded = !expanded }
+                    .padding(horizontal = 16.dp, vertical = 10.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                Text(
+                    text = title,
+                    color = appTextPrimaryColor(),
+                    fontSize = 15.sp,
+                    lineHeight = 20.sp,
+                    fontWeight = FontWeight.Medium,
+                    modifier = Modifier.weight(1f)
+                )
+                Text(
+                    text = selectedValue,
+                    color = appTextSecondaryColor(),
+                    fontSize = 13.sp,
+                    lineHeight = 18.sp,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+                Icon(
+                    imageVector = if (expanded) Icons.Filled.KeyboardArrowUp else Icons.Filled.KeyboardArrowDown,
+                    contentDescription = null,
+                    tint = appTextSecondaryColor(),
+                    modifier = Modifier.size(20.dp)
+                )
+            }
+
+            if (expanded) {
+                Column(
+                    modifier = Modifier.padding(start = 10.dp, end = 10.dp, bottom = 10.dp),
+                    verticalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    options.forEachIndexed { index, option ->
+                        val selected = index == selectedIndex
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .heightIn(min = 50.dp)
+                                .clip(AppButtonShape)
+                                .background(appSurfaceColor())
+                                .semantics(mergeDescendants = true) {
+                                    role = Role.RadioButton
+                                    stateDescription = tr(if (selected) "Выбрано" else "Не выбрано")
+                                }
+                                .clickable(role = Role.RadioButton) {
+                                    onSelect(index)
+                                    expanded = false
+                                }
+                                .padding(horizontal = 14.dp, vertical = 10.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            Text(
+                                text = option,
+                                color = appTextPrimaryColor(),
+                                fontSize = 14.sp,
+                                lineHeight = 18.sp,
+                                fontWeight = if (selected) FontWeight.Medium else FontWeight.Normal
+                            )
+                            if (selected) {
+                                Text(
+                                    text = "✓",
+                                    color = appTextSecondaryColor(),
+                                    fontSize = 15.sp,
+                                    lineHeight = 18.sp
+                                )
+                            }
+                        }
+                    }
+                }
+            }
         }
     }
 }
@@ -1719,48 +1912,65 @@ internal fun MenuScreen(
     Column(
         modifier = Modifier
             .fillMaxSize()
-            .padding(top = 8.dp),
-        verticalArrangement = Arrangement.spacedBy(14.dp)
+            .padding(horizontal = 4.dp, vertical = 8.dp),
+        verticalArrangement = Arrangement.spacedBy(12.dp)
     ) {
-        MenuNavButton(label = "Управление серверами", icon = Icons.Filled.GridView, onClick = onServers)
-        MenuNavButton(label = "Настройки", icon = Icons.Filled.Settings, onClick = onSettings)
-        MenuNavButton(label = "О приложении", icon = Icons.Filled.Info, onClick = onAbout)
+        MenuNavButton(
+            label = "Управление серверами",
+            subtitle = "Установка Relay и управление комнатами",
+            icon = Icons.Filled.GridView,
+            onClick = onServers
+        )
+        MenuNavButton(
+            label = "Настройки",
+            subtitle = "Тема, язык и приватность",
+            icon = Icons.Filled.Settings,
+            onClick = onSettings
+        )
+        MenuNavButton(
+            label = "О приложении",
+            subtitle = "Версия и информация о приложении",
+            icon = Icons.Filled.Info,
+            onClick = onAbout
+        )
     }
 }
 
 @Composable
 internal fun MenuNavButton(
     label: String,
+    subtitle: String,
     icon: ImageVector,
     onClick: () -> Unit
 ) {
+    val lightTheme = isAppLightTheme()
+
     Surface(
         modifier = Modifier
             .fillMaxWidth()
             .semantics(mergeDescendants = true) { role = Role.Button }
             .clickable(role = Role.Button, onClick = onClick),
-        color = appSurfaceColor(),
+        color = appMenuItemColor(),
         shape = InnerCardShape,
         tonalElevation = 0.dp,
         shadowElevation = 0.dp
     ) {
         Row(
             modifier = Modifier
-                .heightIn(min = 72.dp)
-                .border(1.dp, appBorderColor(0.95f), InnerCardShape)
-                .padding(horizontal = 14.dp, vertical = 14.dp),
+                .heightIn(min = 74.dp)
+                .border(1.dp, appGrayControlBorderColor(), InnerCardShape)
+                .padding(horizontal = 14.dp, vertical = 12.dp),
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(12.dp)
         ) {
             Box(
                 modifier = Modifier
                     .size(42.dp)
-                    .clip(RoundedCornerShape(12.dp))
-                    .background(AppAccent.copy(alpha = 0.12f))
-                    .border(1.dp, AppAccent.copy(alpha = 0.32f), RoundedCornerShape(12.dp)),
+                    .clip(AppButtonShape)
+                    .background(if (lightTheme) AppAccentEnd else AppAccent.copy(alpha = 0.24f)),
                 contentAlignment = Alignment.Center
             ) {
-                Icon(icon, contentDescription = null, tint = AppAccent, modifier = Modifier.size(21.dp))
+                Icon(icon, contentDescription = null, tint = Color.White, modifier = Modifier.size(21.dp))
             }
 
             Column(
@@ -1771,11 +1981,27 @@ internal fun MenuNavButton(
                     text = label,
                     color = appTextPrimaryColor(),
                     fontSize = 16.sp,
-                    lineHeight = 24.sp,
+                    lineHeight = 21.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+                Text(
+                    text = subtitle,
+                    color = appTextSecondaryColor(),
+                    fontSize = 12.sp,
+                    lineHeight = 17.sp,
                     maxLines = 2,
                     overflow = TextOverflow.Ellipsis
                 )
             }
+
+            Icon(
+                imageVector = Icons.AutoMirrored.Filled.KeyboardArrowRight,
+                contentDescription = null,
+                tint = appTextSecondaryColor(),
+                modifier = Modifier.size(22.dp)
+            )
         }
     }
 }

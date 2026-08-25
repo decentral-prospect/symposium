@@ -2,46 +2,57 @@ package com.decentralprospect.symposium
 
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.runtime.Composable
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 
-val AppAccent = Color(0xFFFB8F46)
-val AppAccentHover = Color(0xFFFF966B)
-val AppAccentPressed = Color(0xFFE7652E)
-val AppAccentSubtleDark = Color(0xFF3A1D12)
-val AppAccentSubtleLight = Color(0xFFFFE1D2)
-val AppOnAccent = Color(0xFF1A0B06)
+val AppAccentStart = Color(0xFFFB8F46)
+val AppAccentEnd = Color(0xFFDA551C)
+val AppAccent = AppAccentStart
+val AppAccentHover = Color(0xFFFFA267)
+val AppAccentPressed = AppAccentEnd
+val AppAccentSubtleDark = Color(0xFF3D1C09)
+val AppAccentSubtleLight = Color(0xFFFFE3D1)
+val AppOnAccent = Color.White
 
-val DarkBackground = Color(0xFF0E1013)
-val DarkSurface = Color(0xFF16191E)
-val DarkSurfaceElevated = Color(0xFF1F232A)
-val DarkFieldFill = Color(0xFF12151A)
-val DarkFieldBorder = Color(0xFF333842)
-val DarkBorder = Color(0xFF2B3038)
+val DarkBackground = Color(0xFF0E0E10)
+val DarkSurface = Color(0xFF0E0E10)
+val DarkSurfaceElevated = Color(0xFF28272D)
+val DarkGrayControl = Color(0xFF45434B)
+val DarkMenuItem = Color(0xFF45434B)
+val DarkRoomSurface = Color(0xFF28272D)
+val DarkFieldFill = Color(0xFF28272D)
+val DarkFieldBorder = Color(0xFF45434B)
+val DarkBorder = Color(0xFF28272D)
+val DarkBottomNav = Color(0xFF1E1D23)
 
-val DarkTextPrimary = Color(0xFFF7F1EC)
-val DarkTextSecondary = Color(0xFFC8BDB5)
-val DarkTextMuted = Color(0xFF8B817A)
+val DarkTextPrimary = Color.White
+val DarkTextSecondary = Color(0xFFA0A0A0)
+val DarkTextMuted = Color(0xFF737373)
 
-val LightBackground = Color(0xFFF5EFE9)
-val LightSurface = Color(0xFFFFF9F4)
-val LightSurfaceElevated = Color(0xFFF8EFE7)
-val LightFieldFill = Color(0xFFF0E5DC)
-val LightFieldBorder = Color(0xFFD7C8BC)
-val LightBorder = Color(0xFFD1C2B6)
+val LightBackground = Color.White
+val LightSurface = Color.White
+val LightSurfaceElevated = Color(0xFFF8F8F8)
+val LightGrayControl = Color(0xFFDADADA)
+val LightMenuItem = Color(0xFFDADADA)
+val LightRoomSurface = Color(0xFFF8F8F8)
+val LightFieldFill = Color(0xFFF8F8F8)
+val LightFieldBorder = Color(0xFFDADADA)
+val LightBorder = Color(0xFFE6E6E6)
+val LightBottomNav = Color(0xFFF8F8F8)
 
-val LightTextPrimary = Color(0xFF1D120D)
-val LightTextSecondary = Color(0xFF5C473B)
-val LightTextMuted = Color(0xFF7F6D62)
+val LightTextPrimary = Color(0xFF0E0E10)
+val LightTextSecondary = Color(0xFF7F7F7F)
+val LightTextMuted = Color(0xFF9A9A9A)
 
-val AppSuccess = Color(0xFF2FA866)
-val AppSuccessPressed = Color(0xFF207849)
-val AppSuccessContainerDark = Color(0xFF153C28)
-val AppSuccessContainerLight = Color(0xFFDDF5E8)
+val AppSuccess = Color(0xFF00C950)
+val AppSuccessPressed = Color(0xFF009E3F)
+val AppSuccessContainerDark = Color(0xFF07371B)
+val AppSuccessContainerLight = Color(0xFFD9F8E5)
 
-val AppError = Color(0xFFB63A32)
-val AppErrorPressed = Color(0xFF84231E)
-val AppErrorContainerDark = Color(0xFF471916)
-val AppErrorContainerLight = Color(0xFFF7D8D4)
+val AppError = Color(0xFFF44336)
+val AppErrorPressed = Color(0xFFD32F2F)
+val AppErrorContainerDark = Color(0xFF481513)
+val AppErrorContainerLight = Color(0xFFFFDEDC)
 
 val AppWarning = Color(0xFFC58232)
 val AppWarningContainerDark = Color(0xFF432A12)
@@ -49,30 +60,39 @@ val AppWarningContainerLight = Color(0xFFF7E7CF)
 
 val AppIdle = Color(0xFF7D746D)
 
-val CallBackground = Color(0xFF08090B)
+val CallBackground = DarkBackground
 val CallSurface = DarkSurface
 val CallSurfaceElevated = DarkSurfaceElevated
-val CallControlBackground = Color(0xFF171A20)
+val CallControlBackground = DarkSurfaceElevated
 val CallFieldFill = DarkBackground
 val CallBorder = DarkBorder
 val CallFieldBorder = DarkFieldBorder
 val CallTextPrimary = DarkTextPrimary
 val CallTextSecondary = DarkTextSecondary
 
-val CallLightBackground = Color(0xFFF1E8E0)
-val CallLightSurface = Color(0xFFFFFBF7)
-val CallLightSurfaceElevated = Color(0xFFF7EEE6)
-val CallLightControlBackground = Color(0xFFEADDD1)
-val CallLightFieldFill = Color(0xFFE7D9CC)
-val CallLightBorder = Color(0xFFC9B6A7)
-val CallLightFieldBorder = Color(0xFFB9A392)
-val CallLightTextPrimary = Color(0xFF21140F)
-val CallLightTextSecondary = Color(0xFF624D41)
+val CallLightBackground = LightBackground
+val CallLightSurface = LightSurface
+val CallLightSurfaceElevated = LightSurfaceElevated
+val CallLightControlBackground = Color(0xFFECECEC)
+val CallLightFieldFill = LightFieldFill
+val CallLightBorder = LightBorder
+val CallLightFieldBorder = LightFieldBorder
+val CallLightTextPrimary = LightTextPrimary
+val CallLightTextSecondary = LightTextSecondary
 
 val CallControlActive = AppAccent
 val CallIcon = CallTextPrimary
 val CallIconMuted = CallTextSecondary
 
+internal fun appPrimaryGradient(alpha: Float = 1f): Brush {
+    val resolvedAlpha = alpha.coerceIn(0f, 1f)
+    return Brush.horizontalGradient(
+        colors = listOf(
+            AppAccentStart.copy(alpha = resolvedAlpha),
+            AppAccentEnd.copy(alpha = resolvedAlpha)
+        )
+    )
+}
 
 @Composable
 internal fun isAppLightTheme(): Boolean =
@@ -137,6 +157,27 @@ internal fun appSurfaceColor(): Color =
 @Composable
 internal fun appSurfaceElevatedColor(): Color =
     MaterialTheme.colorScheme.surfaceVariant
+
+@Composable
+internal fun appGrayControlColor(): Color =
+    if (isAppLightTheme()) LightGrayControl else DarkGrayControl
+
+@Composable
+internal fun appMenuItemColor(): Color =
+    if (isAppLightTheme()) LightMenuItem else DarkMenuItem
+
+@Composable
+internal fun appRoomSurfaceColor(): Color =
+    if (isAppLightTheme()) LightRoomSurface else DarkRoomSurface
+
+@Composable
+internal fun appBottomNavColor(): Color =
+    if (isAppLightTheme()) LightBottomNav else DarkBottomNav
+
+@Composable
+internal fun appGrayControlBorderColor(alpha: Float = 1f): Color {
+    return Color.Transparent
+}
 
 private fun blendSolid(foreground: Color, background: Color, alpha: Float): Color {
     val a = alpha.coerceIn(0f, 1f)

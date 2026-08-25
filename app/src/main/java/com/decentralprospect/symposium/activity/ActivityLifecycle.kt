@@ -8,9 +8,10 @@ import androidx.compose.ui.Modifier
 import com.decentralprospect.symposium.ui.theme.MyApplicationTheme
 
 internal fun MainActivity.initializeMainActivityAfterCreate() {
+    loadLanguagePrefs()
     loadTelemetryPrivacyPrefs()
     loadAppearancePrefs()
-    startNewRelicTelemetry()
+    startTelemetry()
     incomingConnectLink = intent?.dataString
     requestNotificationPermissionIfNeeded()
     ensureCallServiceBound()
@@ -27,8 +28,12 @@ internal fun MainActivity.initializeMainActivityAfterCreate() {
                     telemetryEnabled = telemetryEnabledState,
                     telemetryPromptShown = telemetryPromptShownState,
                     themeMode = appThemeModeState,
+                    appLanguage = appLanguageState,
                     onThemeModeChange = { mode ->
                         setAppThemeMode(mode, showToast = true)
+                    },
+                    onAppLanguageChange = { language ->
+                        setAppLanguage(language)
                     },
                     onTelemetryConsentResult = { enabled ->
                         setExternalTelemetryEnabled(enabled, showToast = true)
@@ -42,8 +47,8 @@ internal fun MainActivity.initializeMainActivityAfterCreate() {
                         attachCallUiBinder(binder)
                     },
                     initialConnectLink = incomingConnectLink,
-                    onConnect = { url, room, username, tlsPin, modKey ->
-                        connectViaCallService(url, room, username, tlsPin, modKey)
+                    onConnect = { url, room, username, tlsPin, modKey, e2eeSecret ->
+                        connectViaCallService(url, room, username, tlsPin, modKey, e2eeSecret)
                     },
                     onCancelReconnect = {
                         callRuntimeState?.stopReconnectMode()
@@ -140,6 +145,15 @@ internal fun MainActivity.initializeMainActivityAfterCreate() {
                             adminToken = adminToken,
                             roomName = roomName,
                             open = open
+                        )
+                    },
+                    onRotateModeratorKey = { ip: String, httpsPort: Int?, relayTlsPin: String?, adminToken: String?, roomName: String ->
+                        remoteInstaller.rotateModeratorKeyOverHttps(
+                            serverIp = ip,
+                            httpsPort = httpsPort,
+                            relayTlsPin = relayTlsPin,
+                            adminToken = adminToken,
+                            roomName = roomName
                         )
                     },
                     onFetchOpenRooms = { ip: String, httpsPort: Int?, relayTlsPin: String?, adminToken: String? ->

@@ -3,12 +3,24 @@ package com.decentralprospect.symposium
 import android.widget.Toast
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.animateContentSize
+import androidx.compose.animation.expandVertically
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.shrinkVertically
+import androidx.compose.animation.core.FastOutSlowInEasing
+import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.animateDpAsState
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.PaddingValues
@@ -28,6 +40,7 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ContentCopy
@@ -35,13 +48,14 @@ import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.KeyboardArrowUp
+import androidx.compose.material.icons.filled.Lock
+import androidx.compose.material.icons.filled.MeetingRoom
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
-import androidx.compose.material3.Text
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.heading
@@ -50,11 +64,14 @@ import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.blur
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.vector.ImageVector
@@ -65,6 +82,7 @@ import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
@@ -90,9 +108,9 @@ internal fun ActionButton(
             Color.Transparent
         )
         ActionButtonKind.SECONDARY -> Triple(
-            appSurfaceElevatedColor(),
+            appGrayControlColor(),
             appTextPrimaryColor(),
-            appBorderColor(0.95f)
+            appGrayControlBorderColor()
         )
         ActionButtonKind.DANGER -> Triple(
             danger,
@@ -107,17 +125,25 @@ internal fun ActionButton(
     }
     val textColor = textColorOverride ?: baseTextColor
     val borderColor = borderColorOverride ?: baseBorderColor
+    val fillModifier = if (kind == ActionButtonKind.PRIMARY) {
+        Modifier.background(
+            brush = appPrimaryGradient(if (enabled) 1f else 0.35f),
+            shape = AppButtonShape
+        )
+    } else {
+        Modifier.background(if (enabled) bg else bg.copy(alpha = 0.35f))
+    }
 
     Box(
         modifier = modifier
             .heightIn(min = 52.dp)
             .clip(AppButtonShape)
-            .background(if (enabled) bg else bg.copy(alpha = 0.35f))
+            .then(fillModifier)
             .border(1.dp, if (enabled) borderColor else borderColor.copy(alpha = 0.35f), AppButtonShape)
             .semantics(mergeDescendants = true) {
                 role = Role.Button
-                if (loading) stateDescription = "Загрузка"
-                if (!enabled) stateDescription = "Недоступно"
+                if (loading) stateDescription = tr("Загрузка")
+                if (!enabled) stateDescription = tr("Недоступно")
             }
             .clickable(enabled = enabled && !loading, role = Role.Button) { onClick() }
             .padding(horizontal = 14.dp, vertical = 10.dp),
@@ -176,7 +202,7 @@ internal fun QrCodeDialog(
             ) {
                 Image(
                     bitmap = bitmap.asImageBitmap(),
-                    contentDescription = "QR-код",
+                    contentDescription = tr("QR-код"),
                     modifier = Modifier.size(240.dp)
                 )
             }
@@ -193,9 +219,9 @@ internal fun QrCodeDialog(
                 onClick = {
                     val uri = saveQrBitmapToPictures(context, bitmap)
                     if (uri != null) {
-                        Toast.makeText(context, "QR-код сохранён", Toast.LENGTH_SHORT).show()
+                        Toast.makeText(context, tr("QR-код сохранён"), Toast.LENGTH_SHORT).show()
                     } else {
-                        Toast.makeText(context, "Не удалось сохранить QR-код", Toast.LENGTH_SHORT).show()
+                        Toast.makeText(context, tr("Не удалось сохранить QR-код"), Toast.LENGTH_SHORT).show()
                     }
                 },
                 kind = ActionButtonKind.PRIMARY,
@@ -213,6 +239,8 @@ internal fun TopIconAction(
     enabled: Boolean = true,
     loading: Boolean = false,
     accent: Color = AppAccent,
+    backgroundColor: Color = appGrayControlColor(),
+    borderColor: Color = appGrayControlBorderColor(),
     contentDescription: String = "Действие",
     modifier: Modifier = Modifier
 ) {
@@ -220,12 +248,17 @@ internal fun TopIconAction(
         modifier = modifier
             .size(44.dp)
             .clip(RoundedCornerShape(12.dp))
-            .background(appSurfaceElevatedColor())
+            .background(if (enabled || loading) backgroundColor else backgroundColor.copy(alpha = 0.35f))
+            .border(
+                1.dp,
+                if (enabled || loading) borderColor else borderColor.copy(alpha = 0.35f),
+                RoundedCornerShape(12.dp)
+            )
             .semantics {
                 role = Role.Button
-                this.contentDescription = contentDescription
-                if (loading) stateDescription = "Загрузка"
-                if (!enabled) stateDescription = "Недоступно"
+                this.contentDescription = tr(contentDescription)
+                if (loading) stateDescription = tr("Загрузка")
+                if (!enabled) stateDescription = tr("Недоступно")
             }
             .clickable(enabled = enabled && !loading, role = Role.Button) { onClick() },
         contentAlignment = Alignment.Center
@@ -247,6 +280,7 @@ internal fun AppDialog(
     title: String,
     onDismiss: () -> Unit,
     dismissEnabled: Boolean = true,
+    maxWidth: Dp = 560.dp,
     modifier: Modifier = Modifier,
     content: @Composable ColumnScope.() -> Unit,
     actions: (@Composable RowScope.() -> Unit)? = null
@@ -276,7 +310,7 @@ internal fun AppDialog(
             Surface(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .widthIn(max = 560.dp)
+                    .widthIn(max = maxWidth)
                     .padding(horizontal = 18.dp, vertical = 24.dp)
                     .then(modifier),
                 color = appSurfaceColor(),
@@ -314,7 +348,7 @@ internal fun AppDialog(
                                 icon = Icons.Filled.Close,
                                 onClick = onDismiss,
                                 accent = appTextSecondaryColor(),
-                                contentDescription = "Закрыть окно",
+                                contentDescription = tr("Закрыть окно"),
                                 modifier = Modifier.align(Alignment.CenterEnd)
                             )
                         }
@@ -346,11 +380,12 @@ internal fun SectionCard(
     subtitle: String? = null,
     modifier: Modifier = Modifier,
     trailing: (@Composable () -> Unit)? = null,
+    backgroundColor: Color = appSurfaceColor(),
     content: @Composable ColumnScope.() -> Unit
 ) {
     Surface(
         modifier = modifier.fillMaxWidth(),
-        color = appSurfaceColor(),
+        color = backgroundColor,
         shape = CardShape,
         tonalElevation = 0.dp,
         shadowElevation = 0.dp
@@ -501,7 +536,7 @@ internal fun CopyValueRow(
             .fillMaxWidth()
             .clip(InnerCardShape)
             .background(appSurfaceElevatedColor())
-            .border(1.dp, appBorderColor(0.8f), InnerCardShape)
+            .border(1.dp, Color.Transparent, InnerCardShape)
             .padding(horizontal = 12.dp, vertical = 10.dp),
         horizontalArrangement = Arrangement.SpaceBetween,
         verticalAlignment = Alignment.CenterVertically
@@ -514,7 +549,7 @@ internal fun CopyValueRow(
         IconButton(onClick = onCopy) {
             Icon(
                 imageVector = Icons.Filled.ContentCopy,
-                contentDescription = "Копировать",
+                contentDescription = tr("Копировать"),
                 tint = AppAccent
             )
         }
@@ -581,6 +616,109 @@ internal fun HomeConnectionCard(
     }
 }
 
+@Composable
+internal fun HomeConnectScreen(
+    connectLink: String,
+    onConnectLinkChange: (String) -> Unit,
+    username: String,
+    onUsernameChange: (String) -> Unit,
+    parsed: ConnectLinkPayload?,
+    reconnectMode: Boolean,
+    onConnect: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    val invalidLink = connectLink.isNotBlank() && parsed == null
+
+    Column(
+        modifier = modifier
+            .fillMaxSize()
+            .verticalScroll(rememberScrollState())
+            .padding(horizontal = 4.dp, vertical = 24.dp),
+        horizontalAlignment = Alignment.CenterHorizontally
+    ) {
+        Spacer(Modifier.height(30.dp))
+        SymposiumWordmark()
+        Spacer(Modifier.height(44.dp))
+
+        Column(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            Text(
+                text = "Подключение к конференции",
+                color = appTextPrimaryColor(),
+                fontSize = 18.sp,
+                lineHeight = 24.sp,
+                fontWeight = FontWeight.Bold,
+                textAlign = TextAlign.Center
+            )
+            Text(
+                text = "Вы можете оставить поле \"Имя\" пустым",
+                color = appTextSecondaryColor(),
+                fontSize = 14.sp,
+                lineHeight = 20.sp,
+                textAlign = TextAlign.Center
+            )
+        }
+
+        Spacer(Modifier.height(24.dp))
+
+        Column(
+            modifier = Modifier.fillMaxWidth(),
+            verticalArrangement = Arrangement.spacedBy(12.dp)
+        ) {
+            OutlinedTextField(
+                value = username,
+                onValueChange = onUsernameChange,
+                modifier = Modifier.fillMaxWidth(),
+                singleLine = true,
+                placeholder = { Text("Имя") },
+                shape = AppButtonShape,
+                colors = textFieldColors()
+            )
+
+            OutlinedTextField(
+                value = connectLink,
+                onValueChange = onConnectLinkChange,
+                modifier = Modifier.fillMaxWidth(),
+                minLines = 2,
+                maxLines = 4,
+                placeholder = { Text("Вставьте ссылку на встречу") },
+                isError = invalidLink,
+                shape = AppButtonShape,
+                colors = textFieldColors()
+            )
+
+            if (invalidLink) {
+                Text(
+                    text = "Ссылка не распознана. Вставьте ссылку Symposium",
+                    color = AppError,
+                    fontSize = 12.sp,
+                    lineHeight = 16.sp,
+                    modifier = Modifier.padding(horizontal = 4.dp)
+                )
+            } else if (parsed != null) {
+                Text(
+                    text = "${if (parsed.moderatorKey.isBlank()) "Гость" else "Модератор"} · ${parsed.room}",
+                    color = AppSuccess,
+                    fontSize = 12.sp,
+                    lineHeight = 16.sp,
+                    modifier = Modifier.padding(horizontal = 4.dp)
+                )
+            }
+
+            Spacer(Modifier.height(2.dp))
+            ActionButton(
+                label = "Подключиться",
+                onClick = onConnect,
+                enabled = !reconnectMode && parsed != null,
+                modifier = Modifier.fillMaxWidth()
+            )
+        }
+    }
+}
+
 
 internal data class PendingHomeSshHostKeyTrust(
     val ip: String,
@@ -597,101 +735,112 @@ internal fun HomeMainScreen(
     onOpenConnect: () -> Unit,
     onOpenCreateMeeting: () -> Unit,
     onRefreshRooms: () -> Unit,
-    onMeetingClick: (InstallServer, OpenRoomInfo) -> Unit
+    onMeetingClick: (InstallServer, OpenRoomInfo) -> Unit,
+    modifier: Modifier = Modifier
 ) {
     val meetings = servers.flatMap { server ->
         server.openRooms.map { room -> server to room }
     }
 
-    Column(
-        modifier = Modifier.fillMaxWidth(),
-        verticalArrangement = Arrangement.spacedBy(22.dp)
-    ) {
-        Column(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(horizontal = 18.dp)
-                .padding(top = 34.dp),
-            horizontalAlignment = Alignment.CenterHorizontally,
-            verticalArrangement = Arrangement.spacedBy(16.dp)
-        ) {
-            Text(
-                text = "SYMPOSIUM",
-                color = appTextPrimaryColor(),
-                fontFamily = Dos2000FontFamily,
-                fontWeight = FontWeight.Normal,
-                fontSize = 34.sp,
-                letterSpacing = 0.2.sp
-            )
-
-            HeroActionButton(
-                label = "Подключиться",
-                prompt = ">_",
-                primary = true,
-                enabled = !reconnectMode,
-                onClick = onOpenConnect,
-                modifier = Modifier.fillMaxWidth()
-            )
-            HeroActionButton(
-                label = "Создать встречу",
-                prompt = "+",
-                primary = false,
-                enabled = true,
-                onClick = onOpenCreateMeeting,
-                modifier = Modifier.fillMaxWidth()
-            )
-        }
+    BoxWithConstraints(modifier = modifier.fillMaxWidth()) {
+        val hasMeetings = meetings.isNotEmpty()
+        val centeredHeroTop = ((maxHeight - 250.dp) / 2).coerceAtLeast(32.dp)
+        val heroTopPadding by animateDpAsState(
+            targetValue = if (hasMeetings) 32.dp else centeredHeroTop,
+            animationSpec = tween(durationMillis = 520, easing = FastOutSlowInEasing),
+            label = "homeHeroTopPadding"
+        )
 
         Column(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(horizontal = 18.dp),
-            verticalArrangement = Arrangement.spacedBy(10.dp)
+            modifier = Modifier.fillMaxWidth(),
+            verticalArrangement = Arrangement.spacedBy(20.dp)
         ) {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 4.dp)
+                    .padding(top = heroTopPadding),
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.spacedBy(12.dp)
             ) {
-                Text(
-                    text = "Открытые комнаты",
-                    color = appTextPrimaryColor(),
-                    fontSize = 18.sp,
-                    maxLines = 2,
-                    overflow = TextOverflow.Ellipsis,
-                    modifier = Modifier.weight(1f)
+                Column(
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.spacedBy(5.dp)
+                ) {
+                    SymposiumWordmark()
+
+                    Text(
+                        text = "Не телефонный разговор",
+                        color = appTextSecondaryColor(),
+                        fontSize = 14.sp,
+                        lineHeight = 20.sp,
+                        textAlign = TextAlign.Center,
+                        modifier = Modifier.padding(horizontal = 18.dp)
+                    )
+                }
+
+                Spacer(Modifier.height(2.dp))
+
+                HeroActionButton(
+                    label = "Подключиться",
+                    prompt = ">_",
+                    primary = true,
+                    enabled = !reconnectMode,
+                    onClick = onOpenConnect,
+                    modifier = Modifier.fillMaxWidth()
                 )
-                Spacer(Modifier.width(10.dp))
-                RefreshIconButton(
-                    onClick = onRefreshRooms,
-                    enabled = !roomsRefreshing,
-                    loading = roomsRefreshing
+                HeroActionButton(
+                    label = "Создать встречу",
+                    prompt = "+",
+                    primary = false,
+                    enabled = true,
+                    onClick = onOpenCreateMeeting,
+                    modifier = Modifier.fillMaxWidth()
                 )
             }
 
-            if (meetings.isEmpty()) {
-                Box(
+            AnimatedVisibility(
+                visible = hasMeetings,
+                enter = fadeIn(tween(durationMillis = 220, delayMillis = 210)) +
+                    expandVertically(tween(durationMillis = 360, easing = FastOutSlowInEasing)),
+                exit = fadeOut(tween(durationMillis = 140)) +
+                    shrinkVertically(tween(durationMillis = 320, easing = FastOutSlowInEasing))
+            ) {
+                Column(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .clip(InnerCardShape)
-                        .background(appSurfaceColor())
-                        .border(1.dp, appBorderColor(0.75f), InnerCardShape)
-                        .padding(14.dp)
+                        .padding(horizontal = 4.dp)
+                        .padding(top = 8.dp),
+                    verticalArrangement = Arrangement.spacedBy(10.dp)
                 ) {
-                    Text(
-                        text = "Открытые комнаты появятся здесь.",
-                        color = appTextSecondaryColor(),
-                        fontSize = 14.sp,
-                        lineHeight = 20.sp
-                    )
-                }
-            } else {
-                meetings.forEach { (server, room) ->
-                    HomeMeetingRow(
-                        server = server,
-                        room = room,
-                        onClick = { onMeetingClick(server, room) }
-                    )
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 14.dp),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            text = "Открытые комнаты",
+                            color = appTextPrimaryColor(),
+                            fontSize = 18.sp,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                        RefreshIconButton(
+                            onClick = onRefreshRooms,
+                            enabled = !roomsRefreshing,
+                            loading = roomsRefreshing
+                        )
+                    }
+
+                    meetings.forEach { (server, room) ->
+                        HomeMeetingRow(
+                            server = server,
+                            room = room,
+                            onClick = { onMeetingClick(server, room) }
+                        )
+                    }
                 }
             }
         }
@@ -702,19 +851,24 @@ internal fun HomeMainScreen(
 private fun RefreshIconButton(
     onClick: () -> Unit,
     enabled: Boolean = true,
-    loading: Boolean = false
+    loading: Boolean = false,
+    contentDescription: String = "Обновить список комнат",
+    loadingContentDescription: String = "Обновление списка комнат"
 ) {
     Box(
         modifier = Modifier
             .size(42.dp)
             .clip(AppButtonShape)
-            .background(if (enabled || loading) AppAccent else AppAccent.copy(alpha = 0.35f))
+            .background(
+                brush = appPrimaryGradient(if (enabled || loading) 1f else 0.35f),
+                shape = AppButtonShape
+            )
             .border(1.dp, Color.Transparent, AppButtonShape)
             .semantics(mergeDescendants = true) {
                 role = Role.Button
-                contentDescription = if (loading) "Обновление списка комнат" else "Обновить список комнат"
-                if (loading) stateDescription = "Загрузка"
-                if (!enabled) stateDescription = "Недоступно"
+                this.contentDescription = tr(if (loading) loadingContentDescription else contentDescription)
+                if (loading) stateDescription = tr("Загрузка")
+                if (!enabled) stateDescription = tr("Недоступно")
             }
             .clickable(enabled = enabled && !loading, role = Role.Button) { onClick() },
         contentAlignment = Alignment.Center
@@ -736,6 +890,43 @@ private fun RefreshIconButton(
     }
 }
 
+@Composable
+private fun PlainRefreshButton(
+    onClick: () -> Unit,
+    enabled: Boolean,
+    loading: Boolean
+) {
+    val iconColor = if (isAppLightTheme()) appTextPrimaryColor() else Color.White
+
+    Box(
+        modifier = Modifier
+            .size(42.dp)
+            .semantics(mergeDescendants = true) {
+                role = Role.Button
+                contentDescription = tr(if (loading) "Обновление списка серверов" else "Обновить список серверов")
+                if (loading) stateDescription = tr("Загрузка")
+                if (!enabled) stateDescription = tr("Недоступно")
+            }
+            .clickable(enabled = enabled && !loading, role = Role.Button, onClick = onClick),
+        contentAlignment = Alignment.Center
+    ) {
+        if (loading) {
+            CircularProgressIndicator(
+                color = iconColor,
+                strokeWidth = 2.dp,
+                modifier = Modifier.size(20.dp)
+            )
+        } else {
+            Icon(
+                imageVector = Icons.Filled.Refresh,
+                contentDescription = null,
+                tint = iconColor,
+                modifier = Modifier.size(23.dp)
+            )
+        }
+    }
+}
+
 
 @Composable
 private fun CompactTextButton(
@@ -743,9 +934,9 @@ private fun CompactTextButton(
     onClick: () -> Unit,
     enabled: Boolean = true,
     loading: Boolean = false,
-    backgroundColor: Color = appSurfaceElevatedColor(),
+    backgroundColor: Color = appGrayControlColor(),
     contentColor: Color = appTextPrimaryColor(),
-    borderColor: Color = appBorderColor(0.95f)
+    borderColor: Color = appGrayControlBorderColor()
 ) {
     Box(
         modifier = Modifier
@@ -755,8 +946,8 @@ private fun CompactTextButton(
             .border(1.dp, if (enabled) borderColor else borderColor.copy(alpha = 0.35f), AppButtonShape)
             .semantics(mergeDescendants = true) {
                 role = Role.Button
-                if (loading) stateDescription = "Загрузка"
-                if (!enabled) stateDescription = "Недоступно"
+                if (loading) stateDescription = tr("Загрузка")
+                if (!enabled) stateDescription = tr("Недоступно")
             }
             .clickable(enabled = enabled && !loading, role = Role.Button) { onClick() }
             .padding(horizontal = 12.dp, vertical = 8.dp),
@@ -791,20 +982,40 @@ private fun HeroActionButton(
     onClick: () -> Unit,
     modifier: Modifier = Modifier
 ) {
-    val background = if (primary) AppAccent else Color.Transparent
-    val border = if (primary) Color.Transparent else appBorderColor(0.95f)
+    val background = if (primary) AppAccent else appGrayControlColor()
+    val border = if (primary) Color.Transparent else appGrayControlBorderColor()
     val textColor = if (primary) AppOnAccent else appTextPrimaryColor()
     val promptColor = textColor
+    val fillModifier = if (primary) {
+        Modifier.background(
+            brush = appPrimaryGradient(if (enabled) 1f else 0.35f),
+            shape = AppButtonShape
+        )
+    } else {
+        Modifier.background(if (enabled) background else background.copy(alpha = 0.3f))
+    }
+
+    val buttonModifier = if (primary) {
+        modifier.shadow(
+            elevation = 18.dp,
+            shape = AppButtonShape,
+            clip = false,
+            ambientColor = AppAccent.copy(alpha = 0.5f),
+            spotColor = AppAccentEnd.copy(alpha = 0.65f)
+        )
+    } else {
+        modifier
+    }
 
     Box(
-        modifier = modifier
-            .heightIn(min = 60.dp)
+        modifier = buttonModifier
+            .heightIn(min = 54.dp)
             .clip(AppButtonShape)
-            .background(if (enabled) background else background.copy(alpha = 0.3f))
+            .then(fillModifier)
             .border(1.dp, if (enabled) border else border.copy(alpha = 0.35f), AppButtonShape)
             .semantics(mergeDescendants = true) {
                 role = Role.Button
-                if (!enabled) stateDescription = "Недоступно"
+                if (!enabled) stateDescription = tr("Недоступно")
             }
             .clickable(enabled = enabled, role = Role.Button, onClick = onClick)
             .padding(horizontal = 18.dp, vertical = 10.dp),
@@ -833,9 +1044,9 @@ private fun HeroActionButton(
         Text(
             text = label,
             color = textColor,
-            fontSize = 18.sp,
-            lineHeight = 23.sp,
-            fontWeight = FontWeight.Bold,
+            fontSize = 16.sp,
+            lineHeight = 22.sp,
+            fontWeight = FontWeight.Medium,
             maxLines = 1,
             softWrap = false,
             overflow = TextOverflow.Ellipsis,
@@ -846,6 +1057,20 @@ private fun HeroActionButton(
 }
 
 @Composable
+private fun SymposiumWordmark(modifier: Modifier = Modifier) {
+    Text(
+        text = "SYMPOSIUM",
+        color = appTextPrimaryColor(),
+        fontFamily = Dos2000FontFamily,
+        fontWeight = FontWeight.Normal,
+        fontSize = 42.sp,
+        lineHeight = 46.sp,
+        letterSpacing = 0.2.sp,
+        modifier = modifier
+    )
+}
+
+@Composable
 private fun HomeMeetingRow(
     server: InstallServer,
     room: OpenRoomInfo,
@@ -853,22 +1078,22 @@ private fun HomeMeetingRow(
 ) {
     Surface(
         modifier = Modifier.fillMaxWidth(),
-        color = appSurfaceColor(),
+        color = appRoomSurfaceColor(),
         shape = InnerCardShape,
         tonalElevation = 0.dp,
         shadowElevation = 0.dp
     ) {
-        Column(
+        Row(
             modifier = Modifier
-                .border(1.dp, appBorderColor(0.85f), InnerCardShape)
+                .border(1.dp, appGrayControlBorderColor(), InnerCardShape)
                 .clickable(onClick = onClick)
                 .padding(horizontal = 14.dp, vertical = 13.dp),
-            verticalArrangement = Arrangement.spacedBy(7.dp)
+            horizontalArrangement = Arrangement.spacedBy(12.dp),
+            verticalAlignment = Alignment.CenterVertically
         ) {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.Top
+            Column(
+                modifier = Modifier.weight(1f),
+                verticalArrangement = Arrangement.spacedBy(6.dp)
             ) {
                 Text(
                     text = room.name,
@@ -876,28 +1101,39 @@ private fun HomeMeetingRow(
                     fontSize = 18.sp,
                     lineHeight = 24.sp,
                     maxLines = 2,
-                    overflow = TextOverflow.Ellipsis,
-                    modifier = Modifier.weight(1f)
+                    overflow = TextOverflow.Ellipsis
+                )
+
+                Text(
+                    text = "IP: ${serverDisplayAddress(server)}",
+                    color = AppAccent,
+                    fontSize = 13.sp,
+                    lineHeight = 18.sp,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+
+                Text(
+                    text = "Нажмите, чтобы открыть",
+                    color = appTextSecondaryColor(),
+                    fontSize = 12.sp,
+                    lineHeight = 17.sp,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
                 )
             }
 
-            Text(
-                text = "IP: ${serverDisplayAddress(server)}",
-                color = AppAccent,
-                fontSize = 13.sp,
-                lineHeight = 18.sp,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis
-            )
-
-            Text(
-                text = "Нажмите, чтобы открыть",
-                color = appTextSecondaryColor().copy(alpha = 0.82f),
-                fontSize = 12.sp,
-                lineHeight = 17.sp,
-                maxLines = 2,
-                overflow = TextOverflow.Ellipsis
-            )
+            Box(
+                modifier = Modifier.size(42.dp),
+                contentAlignment = Alignment.Center
+            ) {
+                Icon(
+                    imageVector = Icons.Filled.MeetingRoom,
+                    contentDescription = tr("Открыть комнату"),
+                    tint = appTextPrimaryColor(),
+                    modifier = Modifier.size(24.dp)
+                )
+            }
         }
     }
 }
@@ -1022,7 +1258,7 @@ internal fun HomeCreateMeetingDialog(
 
                 Row(
                     modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.Start,
+                    horizontalArrangement = Arrangement.SpaceBetween,
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     CompactTextButton(
@@ -1033,6 +1269,14 @@ internal fun HomeCreateMeetingDialog(
                         contentColor = Color.White,
                         borderColor = AppError
                     )
+
+                    Spacer(Modifier.width(12.dp))
+
+                    PlainRefreshButton(
+                        onClick = onRefresh,
+                        enabled = !loading,
+                        loading = loading
+                    )
                 }
 
                 if (servers.isEmpty()) {
@@ -1041,7 +1285,7 @@ internal fun HomeCreateMeetingDialog(
                             .fillMaxWidth()
                             .clip(InnerCardShape)
                             .background(appSurfaceElevatedColor())
-                            .border(1.dp, appBorderColor(), InnerCardShape)
+                            .border(1.dp, Color.Transparent, InnerCardShape)
                             .padding(12.dp)
                     ) {
                         Text(
@@ -1064,19 +1308,11 @@ internal fun HomeCreateMeetingDialog(
         },
         actions = {
             ActionButton(
-                label = "Обновить",
-                onClick = onRefresh,
-                kind = ActionButtonKind.SECONDARY,
-                enabled = !loading,
-                loading = loading,
-                modifier = Modifier.weight(1f)
-            )
-            ActionButton(
                 label = "Добавить сервер",
                 onClick = onAddServer,
                 kind = ActionButtonKind.PRIMARY,
                 enabled = !loading,
-                modifier = Modifier.weight(1f)
+                modifier = Modifier.fillMaxWidth()
             )
         }
     )
@@ -1161,7 +1397,7 @@ private fun ServerGuideBlock(
             .fillMaxWidth()
             .clip(InnerCardShape)
             .background(appSurfaceElevatedColor())
-            .border(1.dp, appBorderColor(), InnerCardShape)
+            .border(1.dp, Color.Transparent, InnerCardShape)
             .padding(12.dp),
         verticalArrangement = Arrangement.spacedBy(8.dp)
     ) {
@@ -1203,7 +1439,7 @@ private fun HomeServerPickerRow(
     ) {
         Row(
             modifier = Modifier
-                .border(1.dp, appBorderColor(), InnerCardShape)
+                .border(1.dp, appGrayControlBorderColor(), InnerCardShape)
                 .clickable(enabled = enabled, role = Role.Button) { onClick() }
                 .padding(12.dp),
             horizontalArrangement = Arrangement.SpaceBetween,
@@ -1407,7 +1643,7 @@ internal fun HomeInstallRelayDialog(
                             .heightIn(min = 180.dp, max = 240.dp)
                             .clip(InnerCardShape)
                             .background(appSurfaceElevatedColor())
-                            .border(1.dp, appBorderColor(), InnerCardShape),
+                            .border(1.dp, Color.Transparent, InnerCardShape),
                         contentPadding = PaddingValues(12.dp),
                         verticalArrangement = Arrangement.spacedBy(6.dp)
                     ) {
@@ -1483,6 +1719,7 @@ internal fun HomeMeetingDialog(
     onQrGuest: () -> Unit,
     onCopyModerator: () -> Unit,
     onQrModerator: () -> Unit,
+    onRotateModeratorLink: () -> Unit,
     onCloseMeeting: () -> Unit,
     onDismiss: () -> Unit
 ) {
@@ -1490,35 +1727,208 @@ internal fun HomeMeetingDialog(
         title = room.name,
         onDismiss = onDismiss,
         dismissEnabled = !loading,
+        maxWidth = 680.dp,
         content = {
             RoomLinkActionsRow(
                 title = "Гость",
-                subtitle = "",
+                subtitle = "Ссылка для подключения без прав модератора",
                 badgeColor = appTextSecondaryColor(),
                 onCopy = onCopyGuest,
                 onQr = onQrGuest,
-                enabled = !loading
+                enabled = !loading,
+                comfortable = true
             )
             RoomLinkActionsRow(
                 title = "Модератор",
-                subtitle = if (room.moderatorKey.isBlank()) "moderator_key не получен" else "",
+                subtitle = if (room.moderatorKey.isBlank()) {
+                    "moderator_key не получен"
+                } else {
+                    "Ссылка с правами управления комнатой"
+                },
                 badgeColor = AppAccent,
                 onCopy = onCopyModerator,
                 onQr = onQrModerator,
-                enabled = !loading && room.moderatorKey.isNotBlank()
+                enabled = !loading && room.moderatorKey.isNotBlank(),
+                comfortable = true
+            )
+            RoomDialogTextAction(
+                label = "Сменить ссылку модератора",
+                onClick = onRotateModeratorLink,
+                enabled = !loading
             )
         },
         actions = {
             ActionButton(
-                label = "Закрыть встречу",
+                label = "Закрыть комнату",
                 onClick = onCloseMeeting,
-                kind = ActionButtonKind.DANGER,
+                kind = ActionButtonKind.GHOST,
+                textColorOverride = AppError,
+                borderColorOverride = AppError.copy(alpha = 0.35f),
                 enabled = !loading,
                 loading = loading,
                 modifier = Modifier.weight(1f)
             )
         }
     )
+}
+
+@Composable
+private fun RoomDialogTextAction(
+    label: String,
+    onClick: () -> Unit,
+    enabled: Boolean
+) {
+    Row(
+        modifier = Modifier
+            .clip(AppButtonShape)
+            .semantics(mergeDescendants = true) {
+                role = Role.Button
+                if (!enabled) stateDescription = tr("Недоступно")
+            }
+            .clickable(enabled = enabled, role = Role.Button, onClick = onClick)
+            .padding(horizontal = 8.dp, vertical = 8.dp),
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Icon(
+            imageVector = Icons.Filled.Refresh,
+            contentDescription = null,
+            tint = if (enabled) appTextSecondaryColor() else appTextMutedColor(),
+            modifier = Modifier.size(18.dp)
+        )
+        Text(
+            text = label,
+            color = if (enabled) appTextSecondaryColor() else appTextMutedColor(),
+            fontSize = 13.sp,
+            lineHeight = 18.sp,
+            fontWeight = FontWeight.Medium
+        )
+    }
+}
+
+internal fun isInitialConnectionFailure(status: String): Boolean {
+    val normalized = status.trim().lowercase()
+    return normalized.contains("invalid") ||
+        normalized.contains("failed") ||
+        normalized.contains("server error")
+}
+
+internal fun initialConnectionStatusMessage(status: String): String {
+    val normalized = status.trim().lowercase()
+    return when {
+        normalized.contains("invalid e2ee") -> "Ссылка содержит некорректный ключ шифрования."
+        normalized.contains("invalid tls") -> "Не удалось проверить защищённое соединение с сервером."
+        normalized.contains("e2ee initialization failed") -> "Не удалось включить сквозное шифрование."
+        normalized.contains("server error") -> "Сервер отклонил подключение."
+        normalized.contains("reconnecting") -> "Повторяем попытку подключения…"
+        normalized.contains("connecting") -> "Устанавливаем защищённое соединение…"
+        else -> "Готовим подключение…"
+    }
+}
+
+@Composable
+internal fun ConnectingRoomView(
+    roomName: String,
+    status: String,
+    onCancel: () -> Unit
+) {
+    val failed = isInitialConnectionFailure(status)
+    val accent = if (failed) accessibleDangerColor() else accessibleAccentColor()
+    val transition = rememberInfiniteTransition(label = "room_connection")
+    val pulse by transition.animateFloat(
+        initialValue = 0.88f,
+        targetValue = 1.08f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(durationMillis = 900, easing = FastOutSlowInEasing),
+            repeatMode = RepeatMode.Reverse
+        ),
+        label = "room_connection_pulse"
+    )
+
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(appBackgroundColor())
+            .padding(24.dp),
+        contentAlignment = Alignment.Center
+    ) {
+        Column(
+            modifier = Modifier.widthIn(max = 420.dp),
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.spacedBy(18.dp)
+        ) {
+            Box(
+                modifier = Modifier.size(120.dp),
+                contentAlignment = Alignment.Center
+            ) {
+                Box(
+                    modifier = Modifier
+                        .size(96.dp)
+                        .graphicsLayer {
+                            val scale = if (failed) 1f else pulse
+                            scaleX = scale
+                            scaleY = scale
+                            alpha = if (failed) 0.42f else 0.3f + (pulse - 0.88f)
+                        }
+                        .border(2.dp, accent, CircleShape)
+                )
+                Box(
+                    modifier = Modifier
+                        .size(72.dp)
+                        .clip(CircleShape)
+                        .background(accent.copy(alpha = 0.16f)),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Icon(
+                        imageVector = Icons.Filled.Lock,
+                        contentDescription = null,
+                        tint = accent,
+                        modifier = Modifier.size(32.dp)
+                    )
+                }
+            }
+
+            Column(
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                Text(
+                    text = if (failed) "Не удалось подключиться" else "Подключаемся к комнате",
+                    color = appTextPrimaryColor(),
+                    fontSize = 22.sp,
+                    lineHeight = 28.sp,
+                    fontWeight = FontWeight.Bold,
+                    textAlign = TextAlign.Center
+                )
+                if (roomName.isNotBlank()) {
+                    Text(
+                        text = roomName,
+                        color = accent,
+                        fontSize = 16.sp,
+                        lineHeight = 22.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        textAlign = TextAlign.Center,
+                        maxLines = 2,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                }
+                Text(
+                    text = initialConnectionStatusMessage(status),
+                    color = appTextSecondaryColor(),
+                    fontSize = 14.sp,
+                    lineHeight = 20.sp,
+                    textAlign = TextAlign.Center
+                )
+            }
+
+            ActionButton(
+                label = if (failed) "Вернуться" else "Отменить подключение",
+                onClick = onCancel,
+                kind = ActionButtonKind.SECONDARY,
+                modifier = Modifier.fillMaxWidth()
+            )
+        }
+    }
 }
 
 @Composable

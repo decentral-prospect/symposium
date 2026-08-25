@@ -3,6 +3,8 @@ package com.decentralprospect.symposium
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.media.AudioDeviceCallback
+import android.media.AudioFocusRequest
+import android.media.AudioManager
 import android.os.Handler
 import android.os.Looper
 import android.os.PowerManager
@@ -16,6 +18,8 @@ import org.webrtc.AudioSource
 import org.webrtc.AudioTrack
 import org.webrtc.CameraVideoCapturer
 import org.webrtc.EglBase
+import org.webrtc.FrameCryptor
+import org.webrtc.FrameCryptorKeyProvider
 import org.webrtc.PeerConnection
 import org.webrtc.PeerConnectionFactory
 import org.webrtc.RtpSender
@@ -58,9 +62,6 @@ internal class CallRuntime(
 
     internal var telemetryEnabledState by mutableStateOf(false)
     internal var telemetryPromptShownState by mutableStateOf(false)
-    internal var newRelicStarted = false
-    internal var newRelicShutdownInThisProcess = false
-
     internal var eglBase: EglBase? = null
     internal var pcFactory: PeerConnectionFactory? = null
     internal var publishPeerConnection: PeerConnection? = null
@@ -128,6 +129,10 @@ internal class CallRuntime(
     internal var audioRoutingMonitorStarted = false
     internal var audioDeviceCallback: AudioDeviceCallback? = null
     internal var scoStateReceiver: BroadcastReceiver? = null
+    internal val audioRouteHandler = Handler(Looper.getMainLooper())
+    internal val audioFocusChangeListener = AudioManager.OnAudioFocusChangeListener { }
+    internal var audioFocusRequest: AudioFocusRequest? = null
+    internal var callAudioFocusHeld = false
 
     internal var localRole: String = ROLE_GUEST
     internal var lobbyWaiting = false
@@ -197,7 +202,15 @@ internal class CallRuntime(
     internal var lastUsername: String = ""
     internal var lastTlsPin: String = ""
     internal var lastModKey: String = ""
+    internal var lastE2eeSecret: String = ""
     internal var reconnectToken: String = ""
+
+    internal var conferenceE2eeEnabled = false
+    internal var conferenceE2eeKeyProvider: FrameCryptorKeyProvider? = null
+    internal val conferenceE2eeSenderCryptors = ConcurrentHashMap<String, FrameCryptor>()
+    internal val conferenceE2eeReceiverCryptors = ConcurrentHashMap<String, FrameCryptor>()
+    internal val conferenceE2eeStates = ConcurrentHashMap<String, String>()
+    internal var conferenceE2eeLastError: String? = null
 
     internal var micPermissionInFlight = false
     internal var cameraPermissionInFlight = false
@@ -236,7 +249,7 @@ internal class CallRuntime(
 
     internal fun initialize() {
         loadTelemetryPrivacyPrefs()
-        startNewRelicTelemetry()
+        startTelemetry()
         powerManager = appContext.getSystemService(Context.POWER_SERVICE) as PowerManager
         val pm = powerManager!!
 

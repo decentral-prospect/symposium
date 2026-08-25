@@ -53,8 +53,8 @@ internal fun accessiblePositiveColor(): Color = AppSuccess
 @Composable
 internal fun accessibleDangerColor(): Color = AppError
 
-internal val CardShape = RoundedCornerShape(24.dp)
-internal val InnerCardShape = RoundedCornerShape(14.dp)
+internal val CardShape = RoundedCornerShape(14.dp)
+internal val InnerCardShape = RoundedCornerShape(10.dp)
 internal val AppButtonShape = RoundedCornerShape(10.dp)
 internal const val DEFAULT_RELAY_HTTP_PORT = 443
 
@@ -120,6 +120,7 @@ internal data class ConnectLinkPayload(
     val ip: String,
     val room: String,
     val tlsPin: String,
+    val e2eeSecret: String,
     val username: String = "",
     val moderatorKey: String = "",
     val format: ConnectLinkFormat = ConnectLinkFormat.SYMPOSIUM_DEEP_LINK
@@ -145,6 +146,10 @@ internal fun parseConnectLink(raw: String): ConnectLinkPayload? {
     val tlsPin = uri.getQueryParameter("tlsPin")?.trim().orEmpty()
     val username = uri.getQueryParameter("username")?.trim().orEmpty()
     val moderatorKey = if (isDeepLink) uri.getQueryParameter("modKey")?.trim().orEmpty() else ""
+    val fragmentParams = Uri.parse("symposium://fragment?${uri.encodedFragment.orEmpty()}")
+    val e2eeSecret = runCatching {
+        normalizeConferenceE2eeSecret(fragmentParams.getQueryParameter("e2ee").orEmpty())
+    }.getOrNull().orEmpty()
 
     val explicitIp = uri.getQueryParameter("ip")?.trim().orEmpty()
     val httpHost = if (isHttpRedirect) uri.host?.trim().orEmpty() else ""
@@ -161,12 +166,13 @@ internal fun parseConnectLink(raw: String): ConnectLinkPayload? {
         else -> explicitIp
     }
 
-    if (ip.isBlank() || room.isBlank() || tlsPin.isBlank()) return null
+    if (ip.isBlank() || room.isBlank() || tlsPin.isBlank() || e2eeSecret.isBlank()) return null
 
     return ConnectLinkPayload(
         ip = ip,
         room = room,
         tlsPin = tlsPin,
+        e2eeSecret = e2eeSecret,
         username = username,
         moderatorKey = moderatorKey,
         format = if (isHttpRedirect) ConnectLinkFormat.HTTP_REDIRECT else ConnectLinkFormat.SYMPOSIUM_DEEP_LINK
@@ -178,6 +184,7 @@ internal fun buildConnectDeepLink(
     httpsPort: Int?,
     room: String,
     relayTlsPin: String?,
+    e2eeSecret: String,
     moderatorKey: String? = null
 ): String {
     val pin = relayTlsPin?.trim().orEmpty()
@@ -195,6 +202,8 @@ internal fun buildConnectDeepLink(
         builder.appendQueryParameter("modKey", modKey)
     }
 
+    builder.encodedFragment("e2ee=${Uri.encode(normalizeConferenceE2eeSecret(e2eeSecret))}")
+
     return builder.build().toString()
 }
 
@@ -203,6 +212,7 @@ internal fun buildConnectHttpRedirectLink(
     httpsPort: Int?,
     room: String,
     relayTlsPin: String?,
+    e2eeSecret: String,
     moderatorKey: String? = null
 ): String {
     val pin = relayTlsPin?.trim().orEmpty()
@@ -217,6 +227,7 @@ internal fun buildConnectHttpRedirectLink(
         .appendQueryParameter("room", room.trim())
         .appendQueryParameter("tlsPin", pin)
 
+    builder.encodedFragment("e2ee=${Uri.encode(normalizeConferenceE2eeSecret(e2eeSecret))}")
 
     return builder.build().toString()
 }

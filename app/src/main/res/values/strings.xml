@@ -2,4 +2,8 @@
     <string name="app_name">Symposium</string>
     <string name="call_in_progress">Call in progress</string>
     <string name="call_active">Voice connection active</string>
+    <string name="call_listening">Listening in call</string>
+    <string name="open_app">Open</string>
+    <string name="calls_channel_name">Calls</string>
+    <string name="calls_channel_description">Ongoing voice calls</string>
 </resources>

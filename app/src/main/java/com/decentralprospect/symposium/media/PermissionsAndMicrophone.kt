@@ -29,7 +29,7 @@ internal fun CallRuntime.askMic(startServiceAfterGrant: Boolean = false) {
     if (!joinedRoom || lobbyWaiting || webSocket == null) {
         micEnabledState = false
         setMicUi()
-        Toast.makeText(appContext, "Сначала подключитесь к комнате", Toast.LENGTH_SHORT).show()
+        Toast.makeText(appContext, tr("Сначала подключитесь к комнате"), Toast.LENGTH_SHORT).show()
         return
     }
 
@@ -39,7 +39,7 @@ internal fun CallRuntime.askMic(startServiceAfterGrant: Boolean = false) {
         setMicUi()
         startCallService(microphone = false)
         sendSelfMediaState(audioEnabled = false)
-        Toast.makeText(appContext, "Микрофон выключен модератором", Toast.LENGTH_SHORT).show()
+        Toast.makeText(appContext, tr("Микрофон выключен модератором"), Toast.LENGTH_SHORT).show()
         return
     }
 
@@ -64,7 +64,7 @@ internal fun CallRuntime.askMic(startServiceAfterGrant: Boolean = false) {
         if (requester == null) {
             micPermissionInFlight = false
             pendingStartCallServiceAfterMicPermission = false
-            Toast.makeText(appContext, "Откройте приложение, чтобы разрешить микрофон", Toast.LENGTH_SHORT).show()
+            Toast.makeText(appContext, tr("Откройте приложение, чтобы разрешить микрофон"), Toast.LENGTH_SHORT).show()
         } else {
             micPermissionInFlight = true
             pendingStartCallServiceAfterMicPermission = startServiceAfterGrant
@@ -95,7 +95,7 @@ internal fun CallRuntime.askCameraForVideoEnable() {
             cameraPermissionInFlight = false
             cameraRuntimeState = "permission-request-needs-activity"
             updateCameraDebug("request-camera-permission-no-activity")
-            Toast.makeText(appContext, "Откройте приложение, чтобы разрешить камеру", Toast.LENGTH_SHORT).show()
+            Toast.makeText(appContext, tr("Откройте приложение, чтобы разрешить камеру"), Toast.LENGTH_SHORT).show()
         } else {
             cameraPermissionInFlight = true
             cameraRuntimeState = "awaiting-permission"
@@ -124,9 +124,9 @@ internal fun CallRuntime.safeCreateOrAttachMicTrack() {
         startCallService(microphone = micEnabledState && !forcedMutedByModerator)
         sendSelfMediaState(audioEnabled = micEnabledState)
         schedulePublishNegotiation("local-audio-ready")
-        Log.d(TAG, "Mic initialized enabled=$micEnabledState forcedMute=$forcedMutedByModerator")
+        debugLog(TAG, "Mic initialized enabled=$micEnabledState forcedMute=$forcedMutedByModerator")
     } catch (e: Throwable) {
-        Log.w(TAG, "Mic init failed: ${e.message} -> retry with soft AEC/NS")
+        diagnosticWarning(TAG, "Mic init failed: ${e.message} -> retry with soft AEC/NS")
         try {
             recreateAdm(useHwAec = false, useHwNs = false)
             runCatching { localAudioTrack?.dispose() }
@@ -148,12 +148,12 @@ internal fun CallRuntime.safeCreateOrAttachMicTrack() {
             startCallService(microphone = micEnabledState && !forcedMutedByModerator)
             sendSelfMediaState(audioEnabled = micEnabledState)
             schedulePublishNegotiation("local-audio-ready-retry")
-            Log.d(TAG, "Mic initialized (software AEC/NS) enabled=$micEnabledState forcedMute=$forcedMutedByModerator")
+            debugLog(TAG, "Mic initialized (software AEC/NS) enabled=$micEnabledState forcedMute=$forcedMutedByModerator")
         } catch (e2: Throwable) {
             micEnabledState = false
             setMicUi()
             sendSelfMediaState(audioEnabled = false)
-            Log.e(TAG, "Mic init fatal: ${e2.message}")
+            diagnosticError(TAG, "Mic init fatal: ${e2.message}")
             schedulePublishNegotiation("local-audio-failed")
         }
     }
@@ -168,16 +168,24 @@ internal fun CallRuntime.createOrAttachMicTrackInternal() {
 
     if (audioSource == null) {
         audioSource = pcFactory!!.createAudioSource(createVoiceAudioConstraints())
-        Log.d(TAG, "Audio source created")
+        debugLog(TAG, "Audio source created")
     }
 
     if (localAudioTrack == null) {
         localAudioTrack = pcFactory!!.createAudioTrack(nextLocalAudioTrackId(), audioSource)
-        Log.d(TAG, "Local audio track created: ${localAudioTrack?.id()}")
+        localAudioTrack?.setEnabled(false)
+        debugLog(TAG, "Local audio track created: ${localAudioTrack?.id()}")
     }
 
-    runCatching { localAudioTrack?.setEnabled(!forcedMutedByModerator) }
-    ensureLocalAudioSenderInternal()
+    // Bind the disabled track to an active FrameCryptor before allowing the
+    // first encoded audio frame onto the network.
+    runCatching { localAudioTrack?.setEnabled(false) }
+    check(ensureLocalAudioSenderInternal()) { "E2EE audio sender setup failed" }
+    val shouldEnable = !forcedMutedByModerator
+    localAudioTrack?.setEnabled(shouldEnable)
+    check(localAudioTrack?.enabled() == shouldEnable) {
+        "failed to enable the protected audio track"
+    }
 }
 
 internal fun CallRuntime.configureAudioSenderForVoice(sender: RtpSender) {
@@ -190,9 +198,9 @@ internal fun CallRuntime.configureAudioSenderForVoice(sender: RtpSender) {
         }
 
         val applied = sender.setParameters(params)
-        Log.d(TAG, "Audio sender params applied=$applied")
+        debugLog(TAG, "Audio sender params applied=$applied")
     }.onFailure {
-        Log.w(TAG, "Audio sender tuning failed: ${it.message}")
+        diagnosticWarning(TAG, "Audio sender tuning failed: ${it.message}")
     }
 }
 

@@ -2,8 +2,6 @@ package com.decentralprospect.symposium
 
 import android.content.Context
 import android.os.SystemClock
-import android.util.Log
-import com.newrelic.agent.android.NewRelic
 import android.widget.Toast
 import java.util.Locale
 import java.util.UUID
@@ -24,76 +22,31 @@ internal fun MainActivity.persistTelemetryPrivacyPrefs() {
 }
 
 internal fun MainActivity.setExternalTelemetryEnabled(enabled: Boolean, showToast: Boolean = false) {
+    val decisionChanged = !telemetryPromptShownState || enabled != telemetryEnabledState
     telemetryPromptShownState = true
     telemetryEnabledState = enabled
     persistTelemetryPrivacyPrefs()
 
-    if (enabled) {
-        startNewRelicTelemetry()
-        if (showToast) {
-            val message = if (newRelicShutdownInThisProcess) {
-                "Анонимная диагностика включится после перезапуска приложения"
-            } else {
-                "Анонимная диагностика включена"
-            }
-            Toast.makeText(this, message, Toast.LENGTH_SHORT).show()
-        }
-    } else {
-        shutdownNewRelicTelemetry()
-        if (showToast) {
-            Toast.makeText(this, "Анонимная диагностика выключена", Toast.LENGTH_SHORT).show()
-        }
+    if (decisionChanged) {
+        TelemetryClient.get(applicationContext).recordConsentChange(enabled)
+    }
+
+    if (showToast) {
+        val message = if (enabled) "Анонимная диагностика включена" else "Анонимная диагностика выключена"
+        Toast.makeText(this, tr(message), Toast.LENGTH_SHORT).show()
     }
 }
 
 internal fun MainActivity.externalTelemetryActive(): Boolean {
-    return telemetryEnabledState && newRelicStarted && !newRelicShutdownInThisProcess
+    return privacyPrefs().getBoolean(PREF_TELEMETRY_ENABLED, false) &&
+        TelemetryClient.get(applicationContext).configured
 }
 
-internal fun MainActivity.startNewRelicTelemetry() {
-    if (!telemetryEnabledState) return
-    if (newRelicStarted) return
-    if (newRelicShutdownInThisProcess) {
-        Log.w(TAG, "New Relic cannot be restarted in the same app lifecycle after shutdown")
-        return
-    }
-
-    val appToken = newRelicAppTokenFromBuildConfig()
-    if (appToken.isBlank()) {
-        Log.w(TAG, "New Relic app token is not configured in BuildConfig")
-        return
-    }
-
-    runCatching {
-        NewRelic.withApplicationToken(appToken)
-            .start(this.applicationContext)
-        newRelicStarted = true
-    }.onFailure { e ->
-        Log.w(TAG, "New Relic start failed: ${e.message}")
-    }
-}
-
-private fun newRelicAppTokenFromBuildConfig(): String {
-    return runCatching {
-        BuildConfig::class.java
-            .getField("NEW_RELIC_APP_TOKEN")
-            .get(null)
-            ?.toString()
-            ?.trim()
-            .orEmpty()
-    }.getOrDefault("")
-}
-
-internal fun MainActivity.shutdownNewRelicTelemetry() {
-    if (!newRelicStarted || newRelicShutdownInThisProcess) return
-
-    runCatching {
-        NewRelic.shutdown()
-        newRelicStarted = false
-        newRelicShutdownInThisProcess = true
-    }.onFailure { e ->
-        Log.w(TAG, "New Relic shutdown failed: ${e.message}")
-    }
+internal fun MainActivity.startTelemetry() {
+    val client = TelemetryClient.get(applicationContext)
+    client.sendLifecycleSignals()
+    client.recordAppLaunch()
+    client.recordDiagnostic("telemetry.session.started", emptyMap())
 }
 
 internal fun MainActivity.nrAttrs(vararg pairs: Pair<String, Any?>): Map<String, Any> {
@@ -122,7 +75,7 @@ internal fun MainActivity.trackRtcEvent(
     val safeAttrs = sanitizeTelemetryAttrs(attrs)
     val baseAttrs = nrAttrs(
         "eventName" to name,
-        "appVersion" to APP_VERSION,
+        "appVersion" to APP_VERSION_NAME,
         "sessionId" to telemetrySessionId,
         "role" to localRole,
         "reconnectMode" to reconnectMode,
@@ -132,11 +85,7 @@ internal fun MainActivity.trackRtcEvent(
         "subscribeIceState" to subscribeIceState
     )
 
-    runCatching {
-        NewRelic.recordCustomEvent("RtcEvent", name, baseAttrs + safeAttrs)
-    }.onFailure { e ->
-        Log.w(TAG, "New Relic custom event failed: ${e.message}")
-    }
+    TelemetryClient.get(applicationContext).recordDiagnostic(name, baseAttrs + safeAttrs)
 }
 
 internal fun MainActivity.shouldSendImportantTelemetry(name: String, attrs: Map<String, Any>): Boolean {
@@ -312,7 +261,6 @@ internal fun MainActivity.markConferenceConnected(reason: String) {
             )
         )
 
-        recordRtcMetric("Conference Connect Duration ms", connectDurationMs.toDouble())
     }
 
     if (reconnectStartedAtMs > 0L) {
@@ -368,8 +316,6 @@ internal fun MainActivity.finishConferenceTelemetry(reason: String, normal: Bool
         )
     )
 
-    recordRtcMetric("Conference Duration ms", conferenceDurationMs.toDouble())
-    recordRtcMetric("Conference Max Ping ms", maxPingMsInSession.toDouble())
 }
 
 internal fun MainActivity.noteAudioTelemetryError() {
@@ -386,17 +332,6 @@ internal fun MainActivity.noteIceBadStateTelemetry() {
 
 internal fun MainActivity.notePcBadStateTelemetry() {
     pcBadStateCountInSession += 1
-}
-
-internal fun MainActivity.recordRtcMetric(name: String, value: Double) {
-    if (!externalTelemetryActive()) return
-    if (!value.isFinite()) return
-
-    runCatching {
-        NewRelic.recordMetric(name, "WebRTC", value)
-    }.onFailure { e ->
-        Log.w(TAG, "New Relic metric failed: ${e.message}")
-    }
 }
 
 internal suspend fun MainActivity.performRelayInstallationWithTelemetry(
@@ -447,9 +382,6 @@ internal suspend fun MainActivity.performRelayInstallationWithTelemetry(
             )
         )
 
-        recordInstallerMetric("Relay Install Duration ms", durationMs.toDouble())
-        recordInstallerMetric("Relay Install Success", if (result.success) 1.0 else 0.0)
-
         result
     } catch (e: Throwable) {
         val durationMs = relayInstallDurationMs()
@@ -465,9 +397,6 @@ internal suspend fun MainActivity.performRelayInstallationWithTelemetry(
                 "reason" to (e.message ?: e.javaClass.simpleName)
             )
         )
-
-        recordInstallerMetric("Relay Install Duration ms", durationMs.toDouble())
-        recordInstallerMetric("Relay Install Success", 0.0)
 
         throw e
     }
@@ -500,16 +429,5 @@ internal fun MainActivity.installerStageFromLog(line: String): String? {
         "готово" in s -> "finished"
         "ошибка" in s -> "error"
         else -> null
-    }
-}
-
-internal fun MainActivity.recordInstallerMetric(name: String, value: Double) {
-    if (!externalTelemetryActive()) return
-    if (!value.isFinite()) return
-
-    runCatching {
-        NewRelic.recordMetric(name, "Installer", value)
-    }.onFailure { e ->
-        Log.w(TAG, "New Relic installer metric failed: ${e.message}")
     }
 }

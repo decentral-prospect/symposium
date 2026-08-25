@@ -54,7 +54,7 @@ internal fun CallRuntime.ensureLocalAudioSenderInternal(): Boolean {
     }.getOrNull()?.also {
         localAudioTransceiver = it
         localAudioSender = it.sender
-        Log.d(TAG, "Created publish audio transceiver mid=${it.mid}")
+        debugLog(TAG, "Created publish audio transceiver mid=${it.mid}")
     }
 
     val sender = localAudioSender
@@ -62,7 +62,7 @@ internal fun CallRuntime.ensureLocalAudioSenderInternal(): Boolean {
         ?: pc.senders.firstOrNull { it.track()?.kind() == "audio" }
 
     if (sender == null) {
-        Log.e(TAG, "Audio sender is unavailable")
+        diagnosticError(TAG, "Audio sender is unavailable")
         return false
     }
 
@@ -74,6 +74,7 @@ internal fun CallRuntime.ensureLocalAudioSenderInternal(): Boolean {
     if (sender.track() == track) {
         runCatching { sender.setStreams(listOf(streamId)) }
         configureAudioSenderForVoice(sender)
+        attachE2eeSender(sender, "audio")
         return true
     }
 
@@ -83,10 +84,11 @@ internal fun CallRuntime.ensureLocalAudioSenderInternal(): Boolean {
             localAudioTransceiver?.direction = RtpTransceiver.RtpTransceiverDirection.SEND_ONLY
             sender.setStreams(listOf(streamId))
             configureAudioSenderForVoice(sender)
+            attachE2eeSender(sender, "audio")
         }
         ok
     }.getOrElse {
-        Log.e(TAG, "Failed to attach local audio track: ${it.message}")
+        diagnosticError(TAG, "Failed to attach local audio track: ${it.message}")
         false
     }
 }
@@ -106,7 +108,7 @@ internal fun CallRuntime.ensureLocalVideoSenderInternal(): Boolean {
     }.getOrNull()?.also {
         localVideoTransceiver = it
         localVideoSender = it.sender
-        Log.d(TAG, "Created publish video transceiver mid=${it.mid}")
+        debugLog(TAG, "Created publish video transceiver mid=${it.mid}")
     }
 
     val sender = localVideoSender
@@ -114,7 +116,7 @@ internal fun CallRuntime.ensureLocalVideoSenderInternal(): Boolean {
         ?: pc.senders.firstOrNull { it.track()?.kind() == "video" }
 
     if (sender == null) {
-        Log.e(TAG, "Video sender is unavailable")
+        diagnosticError(TAG, "Video sender is unavailable")
         return false
     }
 
@@ -124,6 +126,7 @@ internal fun CallRuntime.ensureLocalVideoSenderInternal(): Boolean {
     if (sender.track() == track) {
         runCatching { sender.setStreams(listOf(streamId)) }
         configureVideoSenderForMobile(sender)
+        attachE2eeSender(sender, "video")
         return true
     }
 
@@ -133,10 +136,11 @@ internal fun CallRuntime.ensureLocalVideoSenderInternal(): Boolean {
             localVideoTransceiver?.direction = RtpTransceiver.RtpTransceiverDirection.SEND_ONLY
             sender.setStreams(listOf(streamId))
             configureVideoSenderForMobile(sender)
+            attachE2eeSender(sender, "video")
         }
         ok
     }.getOrElse {
-        Log.e(TAG, "Failed to attach local video track: ${it.message}")
+        diagnosticError(TAG, "Failed to attach local video track: ${it.message}")
         false
     }
 }
@@ -173,15 +177,8 @@ internal fun CallRuntime.initWebRtc() {
         .setVideoDecoderFactory(decoderFactory)
         .createPeerConnectionFactory()
 
-    val am = callAudioManager()
-    configureCallAudioMode(am)
-    runCatching { am.isSpeakerphoneOn = false }
-    speakerphoneOn = false
-    preferredAudioRoute = bestNonSpeakerAudioRoute(am)
-    currentAudioRoute = preferredAudioRoute
-    setSpeakerState(false)
-    publishAudioRouteToUi()
-    Log.d(TAG, "WebRTC initialized")
+    resetAudioRoutingForIdle()
+    debugLog(TAG, "WebRTC initialized")
 }
 
 internal fun CallRuntime.recreateAdm(useHwAec: Boolean, useHwNs: Boolean) {
@@ -193,7 +190,7 @@ internal fun CallRuntime.recreateAdm(useHwAec: Boolean, useHwNs: Boolean) {
         .setAudioSource(MediaRecorder.AudioSource.VOICE_COMMUNICATION)
         .setAudioRecordErrorCallback(object : JavaAudioDeviceModule.AudioRecordErrorCallback {
             override fun onWebRtcAudioRecordInitError(errorMessage: String?) {
-                Log.e(TAG, "ADM Record init: $errorMessage")
+                diagnosticError(TAG, "ADM Record init: $errorMessage")
                 noteAudioTelemetryError()
                 trackRtcEvent("audio.record.init_error", nrAttrs("message" to errorMessage))
             }
@@ -202,7 +199,7 @@ internal fun CallRuntime.recreateAdm(useHwAec: Boolean, useHwNs: Boolean) {
                 errorCode: JavaAudioDeviceModule.AudioRecordStartErrorCode?,
                 errorMessage: String?
             ) {
-                Log.e(TAG, "ADM Record start: $errorCode $errorMessage")
+                diagnosticError(TAG, "ADM Record start: $errorCode $errorMessage")
                 noteAudioTelemetryError()
                 trackRtcEvent(
                     "audio.record.start_error",
@@ -211,14 +208,14 @@ internal fun CallRuntime.recreateAdm(useHwAec: Boolean, useHwNs: Boolean) {
             }
 
             override fun onWebRtcAudioRecordError(errorMessage: String?) {
-                Log.e(TAG, "ADM Record: $errorMessage")
+                diagnosticError(TAG, "ADM Record: $errorMessage")
                 noteAudioTelemetryError()
                 trackRtcEvent("audio.record.error", nrAttrs("message" to errorMessage))
             }
         })
         .setAudioTrackErrorCallback(object : JavaAudioDeviceModule.AudioTrackErrorCallback {
             override fun onWebRtcAudioTrackInitError(errorMessage: String?) {
-                Log.e(TAG, "ADM Track init: $errorMessage")
+                diagnosticError(TAG, "ADM Track init: $errorMessage")
                 noteAudioTelemetryError()
                 trackRtcEvent("audio.track.init_error", nrAttrs("message" to errorMessage))
             }
@@ -227,7 +224,7 @@ internal fun CallRuntime.recreateAdm(useHwAec: Boolean, useHwNs: Boolean) {
                 errorCode: JavaAudioDeviceModule.AudioTrackStartErrorCode?,
                 errorMessage: String?
             ) {
-                Log.e(TAG, "ADM Track start: $errorCode $errorMessage")
+                diagnosticError(TAG, "ADM Track start: $errorCode $errorMessage")
                 noteAudioTelemetryError()
                 trackRtcEvent(
                     "audio.track.start_error",
@@ -236,7 +233,7 @@ internal fun CallRuntime.recreateAdm(useHwAec: Boolean, useHwNs: Boolean) {
             }
 
             override fun onWebRtcAudioTrackError(errorMessage: String?) {
-                Log.e(TAG, "ADM Track: $errorMessage")
+                diagnosticError(TAG, "ADM Track: $errorMessage")
                 noteAudioTelemetryError()
                 trackRtcEvent("audio.track.error", nrAttrs("message" to errorMessage))
             }
@@ -257,6 +254,7 @@ internal fun CallRuntime.releaseWebRtc() {
     cancelSubscribeRecovery()
     subscribeRecoveryHandler.removeCallbacksAndMessages(null)
 
+    disposeE2eePeerCryptors()
     runCatching { localAudioTrack?.dispose() }
     runCatching { audioSource?.dispose() }
     runCatching { localVideoTrack?.dispose() }
@@ -268,6 +266,7 @@ internal fun CallRuntime.releaseWebRtc() {
     runCatching { subscribePeerConnection?.dispose() }
     runCatching { pcFactory?.dispose() }
     runCatching { audioDeviceModule?.release() }
+    runCatching { conferenceE2eeKeyProvider?.dispose() }
 
     localAudioTrack = null
     audioSource = null
@@ -279,6 +278,9 @@ internal fun CallRuntime.releaseWebRtc() {
     subscribePeerConnection = null
     pcFactory = null
     audioDeviceModule = null
+    conferenceE2eeKeyProvider = null
+    conferenceE2eeEnabled = false
+    conferenceE2eeLastError = null
     eglBase = null
     localAudioSender = null
     localVideoSender = null
@@ -312,6 +314,6 @@ internal fun CallRuntime.releaseWebRtc() {
 }
 
 internal fun CallRuntime.buildIceServers(): List<PeerConnection.IceServer> {
-    Log.d(TAG, "ICE servers: none")
+    debugLog(TAG, "ICE servers: none")
     return emptyList()
 }

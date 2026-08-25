@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<animated-vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:drawable="@drawable/splash_loader_vector">
+    <target
+        android:name="spinner"
+        android:animation="@animator/splash_loader_rotation" />
+</animated-vector>

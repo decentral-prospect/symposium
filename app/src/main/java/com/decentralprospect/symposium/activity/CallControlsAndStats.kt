@@ -12,14 +12,14 @@ internal fun CallRuntime.toggleMic() {
         runCatching { localAudioTrack?.setEnabled(false) }
         setMicUi()
         sendSelfMediaState(audioEnabled = false)
-        Toast.makeText(appContext, "Микрофон выключен модератором", Toast.LENGTH_SHORT).show()
+        Toast.makeText(appContext, tr("Микрофон выключен модератором"), Toast.LENGTH_SHORT).show()
         return
     }
 
     if (!joinedRoom || lobbyWaiting || webSocket == null) {
         micEnabledState = false
         setMicUi()
-        Toast.makeText(appContext, "Сначала подключитесь к комнате", Toast.LENGTH_SHORT).show()
+        Toast.makeText(appContext, tr("Сначала подключитесь к комнате"), Toast.LENGTH_SHORT).show()
         return
     }
 
@@ -35,7 +35,7 @@ internal fun CallRuntime.toggleMic() {
     setMicUi()
     sendSelfMediaState(audioEnabled = micEnabledState)
 
-    Log.d(TAG, "Mic ${if (micEnabledState) "enabled" else "disabled"}")
+    debugLog(TAG, "Mic ${if (micEnabledState) "enabled" else "disabled"}")
     diagLog("Mic toggled", "enabled=$micEnabledState")
     trackRtcEvent("mic.toggled", nrAttrs("enabled" to micEnabledState))
 }
@@ -74,7 +74,7 @@ internal fun CallRuntime.toggleOutput() {
     outputEnabled = !outputEnabled
     setRemoteAudioOutputEnabled(outputEnabled)
     setOutputState(outputEnabled)
-    Log.d(TAG, "Output ${if (outputEnabled) "enabled" else "disabled"}")
+    debugLog(TAG, "Output ${if (outputEnabled) "enabled" else "disabled"}")
     trackRtcEvent("output.toggled", nrAttrs("enabled" to outputEnabled))
 }
 
@@ -98,7 +98,7 @@ internal fun CallRuntime.switchCamera() {
         cameraRuntimeState = "error"
         updateCameraDebug("switch-camera-failed:${e.message}")
         setStatus("Camera switch failed")
-        Log.e(TAG, "Camera switch failed: ${e.message}")
+        diagnosticError(TAG, "Camera switch failed: ${e.message}")
         noteCameraTelemetryError()
         trackRtcEvent("camera.switch.failed", nrAttrs("message" to e.message))
     }
@@ -128,7 +128,7 @@ internal fun CallRuntime.acquireProximityLock() {
     runCatching {
         wl.acquire(WAKELOCK_TIMEOUT_MS)
     }.onFailure {
-        Log.w(TAG, "Proximity acquire failed: ${it.message}")
+        diagnosticWarning(TAG, "Proximity acquire failed: ${it.message}")
     }
 }
 
@@ -136,7 +136,7 @@ internal fun CallRuntime.releaseProximityLock() {
     val wl = proximityWakeLock ?: return
     if (wl.isHeld) {
         runCatching { wl.release() }
-            .onFailure { Log.w(TAG, "Proximity release failed: ${it.message}") }
+            .onFailure { diagnosticWarning(TAG, "Proximity release failed: ${it.message}") }
     }
 }
 
@@ -145,7 +145,7 @@ internal fun CallRuntime.acquirePartialWakeLock() {
     runCatching {
         wl.acquire(WAKELOCK_TIMEOUT_MS)
     }.onFailure {
-        Log.w(TAG, "Partial wake acquire failed: ${it.message}")
+        diagnosticWarning(TAG, "Partial wake acquire failed: ${it.message}")
     }
 }
 
@@ -153,7 +153,7 @@ internal fun CallRuntime.releasePartialWakeLock() {
     val wl = partialWakeLock ?: return
     if (wl.isHeld) {
         runCatching { wl.release() }
-            .onFailure { Log.w(TAG, "Partial wake release failed: ${it.message}") }
+            .onFailure { diagnosticWarning(TAG, "Partial wake release failed: ${it.message}") }
     }
 }
 
@@ -174,6 +174,9 @@ internal fun CallRuntime.disconnect() {
     intentionalDisconnect = true
     runCatching { webSocket?.close(1000, "bye") }
     teardown()
+    lastE2eeSecret = ""
+    lastModKey = ""
+    reconnectToken = ""
 }
 
 internal fun CallRuntime.teardown() {
@@ -209,6 +212,7 @@ internal fun CallRuntime.teardown() {
     stopWakeLockRefresh()
     resetAudioRoutingForIdle()
 
+    disposeE2eePeerCryptors()
     runCatching { publishPeerConnection?.close() }
     runCatching { subscribePeerConnection?.close() }
     publishPeerConnection = null
@@ -220,6 +224,11 @@ internal fun CallRuntime.teardown() {
     localAudioTransceiver = null
     localVideoTransceiver = null
     publishBootstrapDone = false
+
+    runCatching { conferenceE2eeKeyProvider?.dispose() }
+    conferenceE2eeKeyProvider = null
+    conferenceE2eeEnabled = false
+    conferenceE2eeLastError = null
 
     runCatching { localAudioTrack?.dispose() }
     runCatching { audioSource?.dispose() }
@@ -277,7 +286,11 @@ internal fun CallRuntime.teardown() {
     setSpeakerState(false)
 
     resetLocalTrackNamespace()
-    stopCallService()
+    if (!reconnectMode || intentionalDisconnect) {
+        stopCallService()
+    } else {
+        diagLog("Keep foreground service during reconnect")
+    }
     updateCameraDebug("teardown")
     diagLog("Teardown complete")
 }
@@ -396,9 +409,9 @@ internal fun CallRuntime.configureVideoSenderForMobile(sender: RtpSender) {
         }
 
         val ok = sender.setParameters(params)
-        Log.d(TAG, "Video sender params applied=$ok")
+        debugLog(TAG, "Video sender params applied=$ok")
     }.onFailure {
-        Log.w(TAG, "Video sender tuning failed: ${it.message}")
+        diagnosticWarning(TAG, "Video sender tuning failed: ${it.message}")
     }
 }
 

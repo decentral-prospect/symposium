@@ -1,13 +1,18 @@
 package com.decentralprospect.symposium
 
 internal const val TAG = "RTC_APP"
-internal const val APP_VERSION = "v0.3.2"
-internal const val EXPECTED_RELAY_VERSION = APP_VERSION
+internal val APP_VERSION_NAME: String = BuildConfig.VERSION_NAME
+internal val APP_VERSION: String = "v$APP_VERSION_NAME"
+internal val EXPECTED_RELAY_VERSION: String = APP_VERSION
 internal const val TARGET_PUBLISH = "publish"
 internal const val TARGET_SUBSCRIBE = "subscribe"
 internal const val ROLE_GUEST = "guest"
 internal const val ROLE_MODERATOR = "moderator"
-internal const val RECONNECT_DELAY_MS = 5000L
+internal const val RECONNECT_INITIAL_DELAY_MS = 350L
+internal const val RECONNECT_BASE_DELAY_MS = 2_000L
+internal const val RECONNECT_MAX_DELAY_MS = 30_000L
+internal const val RECONNECT_MAX_JITTER_MS = 1_500L
+internal const val RECONNECT_CONNECT_POLL_MS = 1_000L
 internal const val WAKELOCK_TIMEOUT_MS = 10 * 60 * 1000L
 internal const val WAKELOCK_REFRESH_MS = 5 * 60 * 1000L
 internal const val PRIVACY_PREFS_NAME = "privacy_settings"
