@@ -1231,6 +1231,41 @@ class RemoteInstaller(private val appContext: Context) {
         fetchOpenRoomsOverHttps(serverIp, port, pin, token)
     }
 
+    suspend fun rotateModeratorKeyOverHttps(
+        serverIp: String,
+        httpsPort: Int?,
+        relayTlsPin: String?,
+        adminToken: String?,
+        roomName: String
+    ): RoomAdminResult = withContext(Dispatchers.IO) {
+        val token = adminToken?.trim().orEmpty()
+        val pin = relayTlsPin?.trim().orEmpty()
+        val room = roomName.trim()
+        val port = httpsPort ?: 443
+
+        require(token.isNotBlank()) { "Admin token is missing" }
+        require(pin.isNotBlank()) { "TLS pin is missing" }
+        require(room.isNotBlank()) { "Room name is empty" }
+
+        val base = if (port == 443) "https://$serverIp" else "https://$serverIp:$port"
+        val encodedRoom = URLEncoder.encode(room, Charsets.UTF_8.name())
+        val client = pinnedHttpsClient(pin)
+        val request = Request.Builder()
+            .url("$base/admin/rotate-moderator-key?name=$encodedRoom")
+            .header("X-Relay-Key", token)
+            .post(ByteArray(0).toRequestBody(null))
+            .build()
+
+        retryNetworkRequest {
+            client.newCall(request).execute().use { response ->
+                response.body?.string()
+                check(response.isSuccessful) { "Admin request failed: HTTP ${response.code}" }
+            }
+        }
+
+        fetchOpenRoomsOverHttps(serverIp, port, pin, token)
+    }
+
     private suspend fun <T> retryNetworkRequest(block: () -> T): T {
         var attempt = 0
 
@@ -1978,7 +2013,9 @@ class RemoteInstaller(private val appContext: Context) {
             "@@ICE_MIN@@" to profile.iceUdpPortMin.toString(),
             "@@ICE_MAX@@" to profile.iceUdpPortMax.toString(),
             "@@FIREWALL_TAG@@" to shQuote(profile.firewallTag),
-            "@@ADMIN_TOKEN@@" to shQuote(profile.adminToken)
+            "@@ADMIN_TOKEN@@" to shQuote(profile.adminToken),
+            "@@RELAY_DOWNLOAD_URL@@" to GITHUB_SERVER_BINARY_URL,
+            "@@RELAY_SHA256@@" to BuildConfig.RELAY_BINARY_SHA256
         )
         return replacements.entries.fold(ISOLATED_INSTALL_SCRIPT) { script, entry ->
             script.replace(entry.key, entry.value)
@@ -2019,7 +2056,8 @@ class RemoteInstaller(private val appContext: Context) {
         private const val ADMIN_TOKEN_PATH = "/opt/symposium-server/admin-token"
         private const val OPEN_ROOMS_DB_PATH = "/opt/symposium-server/open_rooms.db"
         private const val SERVER_BIN_ASSET_PATH = "symposium/symposium-server-linux-amd64"
-        private const val GITHUB_SERVER_BINARY_URL = "https://github.com/legotkin/symposium-relay/releases/download/symposium/symposium-server-linux-amd64"
+        private val GITHUB_SERVER_BINARY_URL =
+            "https://github.com/decentral-prospect/symposium-relay/releases/download/$APP_VERSION_NAME/symposium-server-linux-amd64"
         private const val RELAY_DOWNLOAD_FAILED_MARKER = "RELAY_DOWNLOAD_FAILED"
         private const val EXISTING_INSTALL_FOUND_MARKER = "EXISTING_INSTALL_FOUND"
         private const val EXISTING_DEPLOYMENT_UNHEALTHY_EXIT_CODE = 42
@@ -2109,7 +2147,8 @@ class RemoteInstaller(private val appContext: Context) {
             FIREWALL_TAG=@@FIREWALL_TAG@@
             ADMIN_TOKEN=@@ADMIN_TOKEN@@
             SCRIPT_DIR="${'$'}(cd "${'$'}(dirname "${'$'}{BASH_SOURCE[0]}")" && pwd)"
-            RELAY_DOWNLOAD_URL="${'$'}{SYMPOSIUM_RELAY_DOWNLOAD_URL:-https://github.com/legotkin/symposium-relay/releases/download/symposium/symposium-server-linux-amd64}"
+            RELAY_DOWNLOAD_URL="${'$'}{SYMPOSIUM_RELAY_DOWNLOAD_URL:-@@RELAY_DOWNLOAD_URL@@}"
+            RELAY_EXPECTED_SHA256="@@RELAY_SHA256@@"
             LOCAL_BINARY="${'$'}SCRIPT_DIR/${'$'}BINARY_NAME.src"
             DOWNLOADED_BINARY="${'$'}SCRIPT_DIR/${'$'}BINARY_NAME.download"
             SERVER_BINARY_SOURCE=""
@@ -2131,6 +2170,7 @@ class RemoteInstaller(private val appContext: Context) {
             trap cleanup EXIT
 
             need_cmd flock || die "required lock utility is unavailable"
+            need_cmd sha256sum || die "required checksum utility is unavailable"
             exec 9>/run/lock/.network-worker-bootstrap.lock
             flock -w 300 9 || die "another installer is still running"
 
@@ -2153,6 +2193,15 @@ class RemoteInstaller(private val appContext: Context) {
               exit 42
             fi
 
+            verify_server_binary() {
+              local path="${'$'}1"
+              local actual
+              [ -s "${'$'}path" ] || return 1
+              actual="${'$'}(sha256sum "${'$'}path")"
+              actual="${'$'}{actual%% *}"
+              [ "${'$'}actual" = "${'$'}RELAY_EXPECTED_SHA256" ]
+            }
+
             download_release_binary() {
               local tmp="${'$'}{DOWNLOADED_BINARY}.part"
               rm -f "${'$'}DOWNLOADED_BINARY" "${'$'}tmp"
@@ -2164,7 +2213,7 @@ class RemoteInstaller(private val appContext: Context) {
               local rc=${'$'}?
               set -e
 
-              if [ "${'$'}rc" -eq 0 ] && [ -s "${'$'}tmp" ]; then
+              if [ "${'$'}rc" -eq 0 ] && verify_server_binary "${'$'}tmp"; then
                 chmod 0750 "${'$'}tmp"
                 mv -f "${'$'}tmp" "${'$'}DOWNLOADED_BINARY"
                 SERVER_BINARY_SOURCE="${'$'}DOWNLOADED_BINARY"
@@ -2173,13 +2222,14 @@ class RemoteInstaller(private val appContext: Context) {
               fi
 
               rm -f "${'$'}tmp" "${'$'}DOWNLOADED_BINARY"
-              log "GitHub Release download failed"
+              log "GitHub Release download or integrity verification failed"
               return 1
             }
 
             select_server_binary() {
               if [ "${'$'}{RELAY_FORCE_LOCAL_BINARY:-0}" = "1" ]; then
                 [ -s "${'$'}LOCAL_BINARY" ] || die "RELAY_DOWNLOAD_FAILED: app fallback binary is not available"
+                verify_server_binary "${'$'}LOCAL_BINARY" || die "RELAY_DOWNLOAD_FAILED: app fallback binary failed integrity verification"
                 SERVER_BINARY_SOURCE="${'$'}LOCAL_BINARY"
                 log "Using SymposiumRelay binary uploaded by the app"
                 return 0
@@ -2317,7 +2367,7 @@ class RemoteInstaller(private val appContext: Context) {
             ROOMS_DB="${'$'}{APP_DIR}/open_rooms.db"
             ADMIN_TOKEN_FILE="${'$'}{APP_DIR}/admin-token"
             SCRIPT_DIR="${'$'}(cd "${'$'}(dirname "${'$'}{BASH_SOURCE[0]}")" && pwd)"
-            RELAY_DOWNLOAD_URL="${'$'}{SYMPOSIUM_RELAY_DOWNLOAD_URL:-https://github.com/legotkin/symposium-relay/releases/download/symposium/symposium-server-linux-amd64}"
+            RELAY_DOWNLOAD_URL="${'$'}{SYMPOSIUM_RELAY_DOWNLOAD_URL:-$GITHUB_SERVER_BINARY_URL}"
             LOCAL_BINARY="${'$'}{SCRIPT_DIR}/symposium-server"
             DOWNLOADED_BINARY="${'$'}{SCRIPT_DIR}/symposium-server.download"
             SERVER_BINARY_SOURCE=""

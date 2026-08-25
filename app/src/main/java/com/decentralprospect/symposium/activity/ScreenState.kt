@@ -15,31 +15,31 @@ internal fun CallRuntime.setStatus(s: String) = postUi {
     }
     statusUiState = finalStatus
     uiStateBinder?.setStatus(finalStatus)
-    Log.d(TAG, "Status: $finalStatus")
+    debugLog(TAG, "Status: $finalStatus")
 }
 
 internal fun CallRuntime.setConnected(on: Boolean) = postUi {
     connectedUiState = on
     uiStateBinder?.setConnected(on)
-    Log.d(TAG, "Connected: $on")
+    debugLog(TAG, "Connected: $on")
 }
 
 internal fun CallRuntime.setPeerId(id: String) = postUi {
     peerIdUiState = id
     uiStateBinder?.setPeerId(id)
-    Log.d(TAG, "PeerID: $id")
+    debugLog(TAG, "PeerID: $id")
 }
 
 internal fun CallRuntime.setIceState(s: String) = postUi {
     iceUiState = s
     uiStateBinder?.setIceState(s)
-    Log.d(TAG, "ICE: $s")
+    debugLog(TAG, "ICE: $s")
 }
 
 internal fun CallRuntime.setPcState(s: String) = postUi {
     pcUiState = s
     uiStateBinder?.setPcState(s)
-    Log.d(TAG, "PC: $s")
+    debugLog(TAG, "PC: $s")
 }
 
 internal fun CallRuntime.refreshCombinedStates() {
@@ -115,19 +115,19 @@ internal fun CallRuntime.setCameraDebugUi(s: String) = postUi {
 internal fun CallRuntime.setOutputState(on: Boolean) = postUi {
     outputEnabled = on
     uiStateBinder?.setOutput(on)
-    Log.d(TAG, "Output: $on")
+    debugLog(TAG, "Output: $on")
 }
 
 internal fun CallRuntime.setSpeakerState(on: Boolean) = postUi {
     speakerphoneOn = on
     uiStateBinder?.setSpeaker(on)
-    Log.d(TAG, "Speaker: $on route=$currentAudioRoute")
+    debugLog(TAG, "Speaker: $on route=$currentAudioRoute")
 }
 
 internal fun CallRuntime.setVideoUi(on: Boolean) = postUi {
     videoEnabledState = on
     uiStateBinder?.setVideo(on)
-    Log.d(TAG, "Video: $on")
+    debugLog(TAG, "Video: $on")
 }
 
 internal fun CallRuntime.syncModerationStateToUi() = postUi {
@@ -189,14 +189,18 @@ internal fun CallRuntime.diagLog(message: String, details: Any? = null) {
         java.text.SimpleDateFormat("HH:mm:ss.SSS", Locale.US).format(java.util.Date())
     }.getOrDefault(System.currentTimeMillis().toString())
 
-    val safeDetails = details?.let { sanitizeLogText(it.toString()) }
+    val safeDetails = if (BuildConfig.DEBUG) {
+        details?.let { sanitizeLogText(it.toString()) }
+    } else {
+        null
+    }
     val line = if (safeDetails == null) {
         "[$ts] $message"
     } else {
         "[$ts] $message $safeDetails"
     }
 
-    Log.d(TAG, line)
+    debugLog(TAG, line)
     synchronized(diagLogLines) {
         diagLogLines.addLast(line)
         while (diagLogLines.size > diagLogMaxLines) {

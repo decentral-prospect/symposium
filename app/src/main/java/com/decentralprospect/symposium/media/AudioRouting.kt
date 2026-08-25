@@ -4,8 +4,10 @@ import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
+import android.media.AudioAttributes
 import android.media.AudioDeviceCallback
 import android.media.AudioDeviceInfo
+import android.media.AudioFocusRequest
 import android.media.AudioManager
 import android.os.Build
 import android.os.Handler
@@ -54,7 +56,7 @@ internal fun CallRuntime.setAudioRouteFromUi(raw: String) {
         "speaker" -> AudioRoute.SPEAKER
         "headset" -> {
             when {
-                hasBluetoothCallDevice(am) || hasBluetoothOutputDevice(am) -> AudioRoute.BLUETOOTH
+                hasBluetoothCallDevice(am) -> AudioRoute.BLUETOOTH
                 hasWiredHeadset(am) -> AudioRoute.WIRED_HEADSET
                 else -> AudioRoute.EARPIECE
             }
@@ -76,7 +78,56 @@ internal fun CallRuntime.callAudioManager(): AudioManager {
 }
 
 internal fun CallRuntime.configureCallAudioMode(am: AudioManager = callAudioManager()) {
+    requestCallAudioFocus(am)
     am.mode = AudioManager.MODE_IN_COMMUNICATION
+}
+
+@Suppress("DEPRECATION")
+internal fun CallRuntime.requestCallAudioFocus(am: AudioManager = callAudioManager()) {
+    if (callAudioFocusHeld) return
+
+    val result = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+        val request = AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN_TRANSIENT)
+            .setAudioAttributes(
+                AudioAttributes.Builder()
+                    .setUsage(AudioAttributes.USAGE_VOICE_COMMUNICATION)
+                    .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
+                    .build()
+            )
+            .setAcceptsDelayedFocusGain(false)
+            .setOnAudioFocusChangeListener(audioFocusChangeListener)
+            .build()
+        audioFocusRequest = request
+        am.requestAudioFocus(request)
+    } else {
+        am.requestAudioFocus(
+            audioFocusChangeListener,
+            AudioManager.STREAM_VOICE_CALL,
+            AudioManager.AUDIOFOCUS_GAIN_TRANSIENT
+        )
+    }
+
+    callAudioFocusHeld = result == AudioManager.AUDIOFOCUS_REQUEST_GRANTED
+    if (!callAudioFocusHeld) {
+        diagLog("Call audio focus not granted", "result=$result")
+    }
+}
+
+@Suppress("DEPRECATION")
+internal fun CallRuntime.abandonCallAudioFocus(am: AudioManager = callAudioManager()) {
+    if (!callAudioFocusHeld && audioFocusRequest == null) return
+
+    runCatching {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            audioFocusRequest?.let { am.abandonAudioFocusRequest(it) }
+        } else {
+            am.abandonAudioFocus(audioFocusChangeListener)
+        }
+    }.onFailure {
+        diagnosticWarning(TAG, "Failed to abandon call audio focus: ${it.message}")
+    }
+    callAudioFocusHeld = false
+    audioFocusRequest = null
 }
 
 internal fun CallRuntime.startAudioRoutingMonitor() {
@@ -150,7 +201,7 @@ internal fun CallRuntime.startAudioRoutingMonitor() {
     runCatching {
         appContext.registerReceiver(receiver, IntentFilter(AudioManager.ACTION_SCO_AUDIO_STATE_UPDATED))
     }.onFailure {
-        Log.w(TAG, "Failed to register SCO receiver: ${it.message}")
+        diagnosticWarning(TAG, "Failed to register SCO receiver: ${it.message}")
     }
 
     diagLog("Audio routing monitor started", describeAudioDevices())
@@ -188,13 +239,22 @@ internal fun CallRuntime.applyPreferredAudioRoute(reason: String) {
     val am = callAudioManager()
     val route = when {
         preferredAudioRoute == AudioRoute.SPEAKER -> AudioRoute.SPEAKER
+        preferredAudioRoute == AudioRoute.EARPIECE -> AudioRoute.EARPIECE
         preferredAudioRoute == AudioRoute.BLUETOOTH && (hasBluetoothCallDevice(am) || hasBluetoothOutputDevice(am)) -> AudioRoute.BLUETOOTH
         preferredAudioRoute == AudioRoute.WIRED_HEADSET && hasWiredHeadset(am) -> AudioRoute.WIRED_HEADSET
         hasBluetoothCallDevice(am) -> AudioRoute.BLUETOOTH
         hasWiredHeadset(am) -> AudioRoute.WIRED_HEADSET
-        else -> AudioRoute.EARPIECE
+        else -> AudioRoute.SPEAKER
     }
     setAudioRoute(route, reason)
+}
+
+internal fun CallRuntime.defaultCallAudioRoute(am: AudioManager = callAudioManager()): AudioRoute {
+    return when {
+        hasBluetoothCallDevice(am) -> AudioRoute.BLUETOOTH
+        hasWiredHeadset(am) -> AudioRoute.WIRED_HEADSET
+        else -> AudioRoute.SPEAKER
+    }
 }
 
 internal fun CallRuntime.bestNonSpeakerAudioRoute(am: AudioManager = callAudioManager()): AudioRoute {
@@ -208,7 +268,83 @@ internal fun CallRuntime.bestNonSpeakerAudioRoute(am: AudioManager = callAudioMa
 internal fun CallRuntime.setAudioRoute(requestedRoute: AudioRoute, reason: String) {
     val am = callAudioManager()
     configureCallAudioMode(am)
+    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S && setAudioRouteModern(am, requestedRoute, reason)) {
+        return
+    }
     setAudioRouteLegacy(am, requestedRoute, reason)
+}
+
+internal fun CallRuntime.schedulePreferredAudioRouteReapply(reason: String) {
+    audioRouteHandler.removeCallbacksAndMessages(null)
+    listOf(250L, 1_000L).forEach { delayMs ->
+        audioRouteHandler.postDelayed({
+            if (isCallAudioActive()) {
+                applyPreferredAudioRoute("$reason-after-${delayMs}ms")
+            }
+        }, delayMs)
+    }
+}
+
+internal fun CallRuntime.setAudioRouteModern(
+    am: AudioManager,
+    requestedRoute: AudioRoute,
+    reason: String
+): Boolean {
+    if (Build.VERSION.SDK_INT < Build.VERSION_CODES.S) return false
+
+    val devices = runCatching { am.availableCommunicationDevices }.getOrElse {
+        diagnosticWarning(TAG, "Communication device lookup failed: ${it.message}")
+        return false
+    }
+    val requestedDevice = when (requestedRoute) {
+        AudioRoute.SPEAKER -> devices.firstOrNull { it.type == AudioDeviceInfo.TYPE_BUILTIN_SPEAKER }
+        AudioRoute.EARPIECE -> devices.firstOrNull { it.type == AudioDeviceInfo.TYPE_BUILTIN_EARPIECE }
+        AudioRoute.WIRED_HEADSET -> devices.firstOrNull(::isWiredLikeDevice)
+        AudioRoute.BLUETOOTH -> devices.firstOrNull(::isBluetoothCommunicationDevice)
+    }
+
+    if (requestedDevice == null) {
+        diagLog(
+            "Requested communication device unavailable",
+            "route=$requestedRoute reason=$reason devices=${describeAudioDevices()}"
+        )
+        return false
+    }
+
+    stopBluetoothSco(am)
+    val selected = runCatching { am.setCommunicationDevice(requestedDevice) }.getOrElse {
+        diagnosticWarning(TAG, "Failed to set communication device: ${it.message}")
+        false
+    }
+    if (!selected) {
+        diagLog("Communication device rejected", "route=$requestedRoute reason=$reason")
+        return false
+    }
+
+    val actualDevice = am.communicationDevice ?: requestedDevice
+    val actualRoute = audioRouteFromDevice(actualDevice)
+    when (actualRoute) {
+        AudioRoute.EARPIECE -> acquireProximityLock()
+        else -> releaseProximityLock()
+    }
+
+    val changed = currentAudioRoute != actualRoute
+    currentAudioRoute = actualRoute
+    speakerphoneOn = actualRoute == AudioRoute.SPEAKER
+    setSpeakerState(speakerphoneOn)
+    updateCameraDebug("audio-route-modern:$reason")
+    diagLog(
+        "Communication audio route set",
+        "route=$actualRoute requested=$requestedRoute reason=$reason device=${audioDeviceToString(actualDevice)}"
+    )
+    if (changed) {
+        trackRtcEvent(
+            "audio.route.changed",
+            nrAttrs("route" to actualRoute.name, "requestedRoute" to requestedRoute.name, "reason" to reason)
+        )
+    }
+    publishAudioRouteToUi()
+    return true
 }
 
 @Suppress("DEPRECATION")
@@ -219,8 +355,8 @@ internal fun CallRuntime.setAudioRouteLegacy(
     reason: String
 ) {
     val route = when (requestedRoute) {
-        AudioRoute.BLUETOOTH -> if (hasBluetoothCallDevice(am)) AudioRoute.BLUETOOTH else bestNonSpeakerAudioRoute(am)
-        AudioRoute.WIRED_HEADSET -> if (hasWiredHeadset(am)) AudioRoute.WIRED_HEADSET else bestNonSpeakerAudioRoute(am)
+        AudioRoute.BLUETOOTH -> if (hasBluetoothCallDevice(am)) AudioRoute.BLUETOOTH else defaultCallAudioRoute(am)
+        AudioRoute.WIRED_HEADSET -> if (hasWiredHeadset(am)) AudioRoute.WIRED_HEADSET else defaultCallAudioRoute(am)
         AudioRoute.SPEAKER -> AudioRoute.SPEAKER
         AudioRoute.EARPIECE -> AudioRoute.EARPIECE
     }
@@ -232,7 +368,7 @@ internal fun CallRuntime.setAudioRouteLegacy(
     runCatching {
         am.isSpeakerphoneOn = route == AudioRoute.SPEAKER
     }.onFailure {
-        Log.w(TAG, "Failed to set speakerphone=${route == AudioRoute.SPEAKER}: ${it.message}")
+        diagnosticWarning(TAG, "Failed to set speakerphone=${route == AudioRoute.SPEAKER}: ${it.message}")
     }
 
     when (route) {
@@ -245,15 +381,18 @@ internal fun CallRuntime.setAudioRouteLegacy(
         AudioRoute.EARPIECE -> acquireProximityLock()
     }
 
+    val changed = currentAudioRoute != route
     currentAudioRoute = route
     speakerphoneOn = route == AudioRoute.SPEAKER
     setSpeakerState(speakerphoneOn)
     updateCameraDebug("audio-route-legacy:$reason")
     diagLog("Legacy audio route set", "route=$route requested=$requestedRoute reason=$reason devices=${describeAudioDevices()}")
-    trackRtcEvent(
-        "audio.route.changed",
-        nrAttrs("route" to route.name, "requestedRoute" to requestedRoute.name, "reason" to reason)
-    )
+    if (changed) {
+        trackRtcEvent(
+            "audio.route.changed",
+            nrAttrs("route" to route.name, "requestedRoute" to requestedRoute.name, "reason" to reason)
+        )
+    }
     publishAudioRouteToUi()
 }
 
@@ -278,7 +417,7 @@ internal fun CallRuntime.startBluetoothSco(am: AudioManager) {
         diagLog("Bluetooth SCO start requested")
     }.onFailure {
         bluetoothScoStarted = false
-        Log.w(TAG, "Bluetooth SCO start failed: ${it.message}")
+        diagnosticWarning(TAG, "Bluetooth SCO start failed: ${it.message}")
         diagLog("Bluetooth SCO start failed", it.message)
     }
 }
@@ -292,7 +431,7 @@ internal fun CallRuntime.stopBluetoothSco(am: AudioManager = callAudioManager())
             am.isBluetoothScoOn = false
         }
     }.onFailure {
-        Log.w(TAG, "Bluetooth SCO stop failed: ${it.message}")
+        diagnosticWarning(TAG, "Bluetooth SCO stop failed: ${it.message}")
     }
     bluetoothScoStarted = false
 }
@@ -300,10 +439,15 @@ internal fun CallRuntime.stopBluetoothSco(am: AudioManager = callAudioManager())
 internal fun CallRuntime.resetAudioRoutingForIdle() {
     val am = callAudioManager()
 
+    audioRouteHandler.removeCallbacksAndMessages(null)
     stopBluetoothSco(am)
+    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+        runCatching { am.clearCommunicationDevice() }
+    }
     runCatching { am.isSpeakerphoneOn = false }
 
     runCatching { am.mode = AudioManager.MODE_NORMAL }
+    abandonCallAudioFocus(am)
     currentAudioRoute = AudioRoute.EARPIECE
     preferredAudioRoute = AudioRoute.EARPIECE
     speakerphoneOn = false
@@ -317,16 +461,23 @@ internal fun CallRuntime.resetAudioRoutingForIdle() {
 @Suppress("DEPRECATION")
 
 internal fun CallRuntime.hasBluetoothCallDevice(am: AudioManager = callAudioManager()): Boolean {
+    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+        return runCatching {
+            am.availableCommunicationDevices.any(::isBluetoothCommunicationDevice)
+        }.getOrElse {
+            diagnosticWarning(TAG, "Bluetooth communication device lookup failed: ${it.message}")
+            false
+        }
+    }
     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
         return runCatching {
             val outputs = am.getDevices(AudioManager.GET_DEVICES_OUTPUTS)
             val inputs = am.getDevices(AudioManager.GET_DEVICES_INPUTS)
             (outputs.asSequence() + inputs.asSequence()).any { device ->
-                isBluetoothCommunicationDevice(device) ||
-                        device.type == AudioDeviceInfo.TYPE_BLUETOOTH_A2DP
+                isBluetoothCommunicationDevice(device)
             }
         }.getOrElse {
-            Log.w(TAG, "Bluetooth device lookup failed: ${it.message}")
+            diagnosticWarning(TAG, "Bluetooth device lookup failed: ${it.message}")
             false
         }
     }
@@ -342,7 +493,7 @@ internal fun CallRuntime.hasWiredHeadset(am: AudioManager = callAudioManager()):
                 device.isSink && isWiredLikeDevice(device)
             }
         }.getOrElse {
-            Log.w(TAG, "Wired output device lookup failed: ${it.message}")
+            diagnosticWarning(TAG, "Wired output device lookup failed: ${it.message}")
             false
         }
     }
@@ -356,7 +507,7 @@ internal fun CallRuntime.hasBluetoothOutputDevice(am: AudioManager = callAudioMa
             device.isSink && isBluetoothOutputDevice(device)
         }
     }.getOrElse {
-        Log.w(TAG, "Bluetooth output device lookup failed: ${it.message}")
+        diagnosticWarning(TAG, "Bluetooth output device lookup failed: ${it.message}")
         false
     }
 }
@@ -423,7 +574,12 @@ internal fun CallRuntime.describeAudioDevices(): String {
     val ins = am.getDevices(AudioManager.GET_DEVICES_INPUTS)
         .joinToString(prefix = "in=[", postfix = "]") { audioDeviceToString(it) }
 
-    return "$outs $ins speaker=${am.isSpeakerphoneOn} btSco=${am.isBluetoothScoOn}"
+    val communication = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+        am.communicationDevice?.let(::audioDeviceToString) ?: "none"
+    } else {
+        "legacy"
+    }
+    return "$outs $ins communication=$communication speaker=${am.isSpeakerphoneOn} btSco=${am.isBluetoothScoOn}"
 }
 
 internal fun CallRuntime.audioDeviceToString(device: AudioDeviceInfo): String {

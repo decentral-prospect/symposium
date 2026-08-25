@@ -6,9 +6,9 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -17,6 +17,7 @@ import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.VolumeUp
 import androidx.compose.material.icons.filled.AdminPanelSettings
 import androidx.compose.material.icons.filled.CallEnd
 import androidx.compose.material.icons.filled.Close
@@ -26,11 +27,9 @@ import androidx.compose.material.icons.filled.MicOff
 import androidx.compose.material.icons.filled.PhoneInTalk
 import androidx.compose.material.icons.filled.Videocam
 import androidx.compose.material.icons.filled.VideocamOff
-import androidx.compose.material.icons.filled.VolumeUp
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Surface
-import androidx.compose.material3.Text
-import androidx.compose.material3.TextFieldDefaults
+import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.role
@@ -75,7 +74,7 @@ fun AppButton(
             .border(1.dp, border, RoundedCornerShape(999.dp))
             .semantics(mergeDescendants = true) {
                 role = Role.Button
-                stateDescription = if (active) "Выбрано" else "Не выбрано"
+                stateDescription = tr(if (active) "Выбрано" else "Не выбрано")
             }
             .clickable(role = Role.Button) { onClick() }
             .padding(horizontal = 14.dp),
@@ -109,14 +108,14 @@ fun RoundIconButton(
 
     Box(
         modifier = Modifier
-            .size(54.dp)
+            .size(50.dp)
             .clip(CircleShape)
             .background(if (enabled) background else background.copy(alpha = 0.42f))
             .border(1.dp, resolvedBorder, CircleShape)
             .semantics {
                 role = Role.Button
-                this.contentDescription = contentDescription
-                if (!enabled) stateDescription = "Недоступно"
+                this.contentDescription = tr(contentDescription)
+                if (!enabled) stateDescription = tr("Недоступно")
             }
             .clickable(enabled = enabled, role = Role.Button) { onClick() },
         contentAlignment = Alignment.Center
@@ -125,7 +124,7 @@ fun RoundIconButton(
             imageVector = icon,
             contentDescription = null,
             tint = if (enabled) tint else tint.copy(alpha = 0.5f),
-            modifier = Modifier.size(24.dp)
+            modifier = Modifier.size(22.dp)
         )
     }
 }
@@ -148,14 +147,14 @@ fun RoundTextButton(
 
     Box(
         modifier = Modifier
-            .size(54.dp)
+            .size(50.dp)
             .clip(CircleShape)
             .background(if (enabled) background else background.copy(alpha = 0.42f))
             .border(1.dp, resolvedBorder, CircleShape)
             .semantics {
                 role = Role.Button
-                this.contentDescription = contentDescription
-                if (!enabled) stateDescription = "Недоступно"
+                this.contentDescription = tr(contentDescription)
+                if (!enabled) stateDescription = tr("Недоступно")
             }
             .clickable(enabled = enabled, role = Role.Button) { onClick() },
         contentAlignment = Alignment.Center
@@ -163,7 +162,7 @@ fun RoundTextButton(
         Text(
             text = text,
             color = if (enabled) tint else tint.copy(alpha = 0.5f),
-            fontSize = 23.sp,
+            fontSize = 21.sp,
             fontWeight = FontWeight.SemiBold
         )
     }
@@ -197,32 +196,11 @@ fun ControlBar(
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(vertical = 12.dp),
-            horizontalArrangement = Arrangement.Center,
+                .navigationBarsPadding()
+                .padding(start = 8.dp, end = 8.dp, top = 10.dp, bottom = 12.dp),
+            horizontalArrangement = Arrangement.spacedBy(6.dp, Alignment.CenterHorizontally),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            RoundIconButton(
-                icon = if (videoEnabled) Icons.Filled.Videocam else Icons.Filled.VideocamOff,
-                contentDescription = if (videoEnabled) "Выключить камеру" else "Включить камеру",
-                onClick = onVideo,
-                background = callControlBackgroundColor(),
-                tint = if (videoEnabled) callIconColor() else callIconMutedColor(),
-                border = if (videoEnabled) AppAccent.copy(alpha = 0.95f) else Color.Transparent
-            )
-
-            Spacer(Modifier.width(10.dp))
-
-            RoundTextButton(
-                text = "✋",
-                contentDescription = if (handRaised) "Опустить руку" else "Поднять руку",
-                onClick = onHand,
-                background = if (handRaised) accessibleAccentColor() else callControlBackgroundColor(),
-                tint = if (handRaised) AppOnAccent else callIconColor(),
-                border = if (handRaised) accessibleAccentColor().copy(alpha = 0.95f) else Color.Transparent
-            )
-
-            Spacer(Modifier.width(10.dp))
-
             AudioRouteButton(
                 route = audioRoute,
                 headsetAvailable = headsetAvailable,
@@ -230,30 +208,40 @@ fun ControlBar(
                 onSelectRoute = onAudioRouteSelected
             )
 
-            Spacer(Modifier.width(10.dp))
+            RoundIconButton(
+                icon = if (videoEnabled) Icons.Filled.Videocam else Icons.Filled.VideocamOff,
+                contentDescription = tr(if (videoEnabled) "Выключить камеру" else "Включить камеру"),
+                onClick = onVideo,
+                background = if (videoEnabled) callControlBackgroundColor() else accessibleDangerColor(),
+                tint = if (videoEnabled) callIconColor() else Color.White
+            )
+
+            RoundTextButton(
+                text = "✋",
+                contentDescription = tr(if (handRaised) "Опустить руку" else "Поднять руку"),
+                onClick = onHand,
+                background = if (handRaised) accessibleAccentColor() else callControlBackgroundColor(),
+                tint = if (handRaised) AppOnAccent else callIconColor()
+            )
 
             RoundIconButton(
                 icon = if (micEnabled && !micLocked) Icons.Filled.Mic else Icons.Filled.MicOff,
-                contentDescription = if (micLocked) "Микрофон заблокирован модератором" else if (micEnabled) "Выключить микрофон" else "Включить микрофон",
+                contentDescription = tr(if (micLocked) "Микрофон заблокирован модератором" else if (micEnabled) "Выключить микрофон" else "Включить микрофон"),
                 onClick = onMic,
                 background = if (micEnabled && !micLocked) callControlBackgroundColor() else accessibleDangerColor(),
                 tint = if (micEnabled && !micLocked) callIconColor() else Color.White,
                 enabled = !micLocked
             )
 
-            Spacer(Modifier.width(10.dp))
-
             RoundIconButton(
                 icon = Icons.Filled.CallEnd,
-                contentDescription = "Завершить звонок",
+                contentDescription = tr("Завершить звонок"),
                 onClick = onDisconnect,
                 background = accessibleDangerColor(),
                 tint = Color.White
             )
 
             if (showModeratorButton) {
-                Spacer(Modifier.width(10.dp))
-
                 ModeratorBottomButton(
                     pendingCount = moderatorPendingCount,
                     muteAllEnabled = moderatorMuteAllEnabled,
@@ -278,23 +266,20 @@ internal fun AudioRouteButton(
 
     val icon = when (route) {
         AudioOutputRoute.HEADSET -> Icons.Filled.Headset
-        AudioOutputRoute.SPEAKER -> Icons.Filled.VolumeUp
+        AudioOutputRoute.SPEAKER -> Icons.AutoMirrored.Filled.VolumeUp
         AudioOutputRoute.EARPIECE -> Icons.Filled.PhoneInTalk
     }
 
-    val border = when (route) {
-        AudioOutputRoute.HEADSET -> AppAccent.copy(alpha = 0.95f)
-        AudioOutputRoute.SPEAKER -> AppAccent.copy(alpha = 0.95f)
-        AudioOutputRoute.EARPIECE -> Color.Transparent
-    }
+    val highlighted = route != AudioOutputRoute.EARPIECE
+    val speakerSelected = route == AudioOutputRoute.SPEAKER
 
     Box(
-        modifier = Modifier.size(58.dp),
+        modifier = Modifier.size(54.dp),
         contentAlignment = Alignment.Center
     ) {
         RoundIconButton(
             icon = icon,
-            contentDescription = "Выбрать вывод звука",
+            contentDescription = tr("Выбрать вывод звука"),
             onClick = {
                 if (headsetAvailable) {
                     menuOpen = true
@@ -302,9 +287,16 @@ internal fun AudioRouteButton(
                     onToggleSpeaker()
                 }
             },
-            background = callControlBackgroundColor(),
-            tint = callIconColor(),
-            border = border
+            background = when {
+                speakerSelected -> Color.White
+                highlighted -> accessibleAccentColor()
+                else -> callControlBackgroundColor()
+            },
+            tint = when {
+                speakerSelected -> LightTextPrimary
+                highlighted -> AppOnAccent
+                else -> callIconColor()
+            }
         )
 
         if (menuOpen) {
@@ -357,8 +349,9 @@ internal fun AudioRouteMenu(
         )
 
         AudioRouteMenuItem(
-            icon = Icons.Filled.VolumeUp,
+            icon = Icons.AutoMirrored.Filled.VolumeUp,
             selected = selected == AudioOutputRoute.SPEAKER,
+            whiteWhenSelected = true,
             onClick = { onSelect(AudioOutputRoute.SPEAKER) }
         )
 
@@ -374,16 +367,25 @@ internal fun AudioRouteMenu(
 internal fun AudioRouteMenuItem(
     icon: ImageVector,
     selected: Boolean,
+    whiteWhenSelected: Boolean = false,
     onClick: () -> Unit
 ) {
+    val useWhiteStyle = selected && whiteWhenSelected
+
     Box(
         modifier = Modifier
             .size(42.dp)
             .clip(CircleShape)
-            .background(if (selected) AppAccent.copy(alpha = 0.22f) else callControlBackgroundColor())
+            .background(
+                when {
+                    useWhiteStyle -> Color.White
+                    selected -> accessibleAccentColor()
+                    else -> callControlBackgroundColor()
+                }
+            )
             .border(
                 width = 1.dp,
-                color = if (selected) AppAccent.copy(alpha = 0.95f) else callBorderColor(0.65f),
+                color = if (selected) Color.Transparent else callBorderColor(0.65f),
                 shape = CircleShape
             )
             .clickable(onClick = onClick),
@@ -392,7 +394,11 @@ internal fun AudioRouteMenuItem(
         Icon(
             imageVector = icon,
             contentDescription = null,
-            tint = if (selected) AppAccent else callIconColor(),
+            tint = when {
+                useWhiteStyle -> LightTextPrimary
+                selected -> AppOnAccent
+                else -> callIconColor()
+            },
             modifier = Modifier.size(22.dp)
         )
     }
@@ -409,20 +415,19 @@ internal fun ModeratorBottomButton(
     val hasLobbyNotifications = pendingCount > 0
 
     Box(
-        modifier = Modifier.size(58.dp),
+        modifier = Modifier.size(54.dp),
         contentAlignment = Alignment.Center
     ) {
         RoundIconButton(
             icon = Icons.Filled.AdminPanelSettings,
-            contentDescription = "Панель модератора",
+            contentDescription = tr("Панель модератора"),
             onClick = onClick,
-            background = if (muteAllEnabled) accessibleDangerColor() else callControlBackgroundColor(),
-            tint = if (muteAllEnabled) Color.White else callIconColor(),
-            border = when {
-                hasLobbyNotifications -> accessibleAccentColor().copy(alpha = 0.95f)
-                muteAllEnabled -> accessibleDangerColor().copy(alpha = 0.95f)
-                else -> Color.Transparent
-            }
+            background = when {
+                muteAllEnabled -> accessibleDangerColor()
+                hasLobbyNotifications -> accessibleAccentColor()
+                else -> callControlBackgroundColor()
+            },
+            tint = if (muteAllEnabled || hasLobbyNotifications) Color.White else callIconColor()
         )
 
         if (hasLobbyNotifications) {
@@ -547,7 +552,7 @@ internal fun ModeratorComicBubble(
                 ) {
                     Icon(
                         imageVector = Icons.Filled.Close,
-                        contentDescription = "Скрыть",
+                        contentDescription = tr("Скрыть"),
                         tint = AppAccent,
                         modifier = Modifier.size(17.dp)
                     )
@@ -570,18 +575,29 @@ internal fun ModeratorComicBubble(
 }
 
 @Composable
-fun textFieldColors() = TextFieldDefaults.colors(
+fun textFieldColors() = OutlinedTextFieldDefaults.colors(
     focusedContainerColor = appFieldContainerColor(),
     unfocusedContainerColor = appFieldContainerColor(),
     disabledContainerColor = appFieldContainerColor().copy(alpha = 0.55f),
-    focusedIndicatorColor = AppAccent,
-    unfocusedIndicatorColor = appFieldBorderColor(),
-    disabledIndicatorColor = appFieldBorderColor(0.45f),
+    errorContainerColor = appFieldContainerColor(),
+    focusedBorderColor = AppAccent,
+    unfocusedBorderColor = appFieldBorderColor(),
+    disabledBorderColor = appFieldBorderColor(0.45f),
+    errorBorderColor = AppError,
     cursorColor = AppAccent,
+    errorCursorColor = AppError,
     focusedTextColor = appTextPrimaryColor(),
     unfocusedTextColor = appTextPrimaryColor(),
+    disabledTextColor = appTextSecondaryColor(),
+    errorTextColor = appTextPrimaryColor(),
     focusedLabelColor = AppAccent,
     unfocusedLabelColor = appTextSecondaryColor(),
+    disabledLabelColor = appTextMutedColor(),
+    errorLabelColor = AppError,
+    focusedPlaceholderColor = appTextSecondaryColor(),
+    unfocusedPlaceholderColor = appTextSecondaryColor(),
+    disabledPlaceholderColor = appTextMutedColor(),
+    errorPlaceholderColor = appTextSecondaryColor(),
 )
 
 @Composable

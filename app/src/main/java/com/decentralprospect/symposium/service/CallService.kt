@@ -21,9 +21,11 @@ class NotificationDismissedReceiver : BroadcastReceiver() {
         }
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            context.startForegroundService(serviceIntent)
+            runCatching { context.startForegroundService(serviceIntent) }
+                .onFailure { diagnosticWarning(TAG, "Unable to repost call notification: ${it.message}") }
         } else {
-            context.startService(serviceIntent)
+            runCatching { context.startService(serviceIntent) }
+                .onFailure { diagnosticWarning(TAG, "Unable to repost call notification: ${it.message}") }
         }
     }
 }
@@ -32,6 +34,7 @@ class CallService : Service(), CallForegroundController {
 
     private val binder = LocalBinder()
     private var microphoneForeground = false
+    private var foregroundStarted = false
     private var runtimeDestroyed = false
 
     internal lateinit var runtime: CallRuntime
@@ -65,17 +68,18 @@ class CallService : Service(), CallForegroundController {
             else -> microphoneForeground
         }
 
-        if (intent?.action == ACTION_START_MICROPHONE ||
-            intent?.action == ACTION_START_LISTENER ||
-            intent?.action == ACTION_REPOST_NOTIFICATION
-        ) {
-            startForegroundForCall(useMicrophone)
+        when (intent?.action) {
+            ACTION_REPOST_NOTIFICATION -> ensureCallForeground(useMicrophone, force = true)
+            ACTION_START_MICROPHONE,
+            ACTION_START_LISTENER -> ensureCallForeground(useMicrophone)
+            null -> ensureCallForeground(useMicrophone)
         }
 
         return START_STICKY
     }
 
     override fun onDestroy() {
+        foregroundStarted = false
         if (!runtimeDestroyed && ::runtime.isInitialized) {
             runtimeDestroyed = true
             runtime.shutdownBecauseServiceDestroyed()
@@ -84,12 +88,21 @@ class CallService : Service(), CallForegroundController {
     }
 
     override fun startForegroundForCall(microphone: Boolean) {
-        microphoneForeground = microphone
-        startCallForeground(microphone)
+        ensureCallForeground(microphone)
+    }
+
+    private fun ensureCallForeground(microphone: Boolean, force: Boolean = false) {
+        if (!force && foregroundStarted && microphoneForeground == microphone) return
+
+        if (startCallForeground(microphone)) {
+            microphoneForeground = microphone
+            foregroundStarted = true
+        }
     }
 
     override fun stopForegroundForCall() {
         microphoneForeground = false
+        foregroundStarted = false
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
             stopForeground(STOP_FOREGROUND_REMOVE)
         } else {
@@ -99,20 +112,24 @@ class CallService : Service(), CallForegroundController {
         stopSelf()
     }
 
-    private fun startCallForeground(useMicrophone: Boolean) {
+    private fun startCallForeground(useMicrophone: Boolean): Boolean {
         val notification = buildNotification(useMicrophone)
 
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            var type = ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PLAYBACK
+        return runCatching {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                var type = ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PLAYBACK
 
-            if (useMicrophone) {
-                type = type or ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE
+                if (useMicrophone && Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                    type = type or ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE
+                }
+
+                startForeground(NOTIFICATION_ID, notification, type)
+            } else {
+                startForeground(NOTIFICATION_ID, notification)
             }
-
-            startForeground(NOTIFICATION_ID, notification, type)
-        } else {
-            startForeground(NOTIFICATION_ID, notification)
-        }
+        }.onFailure {
+            diagnosticError(TAG, "Unable to keep call service in foreground: ${it.javaClass.simpleName}: ${it.message}")
+        }.isSuccess
     }
 
     private fun dismissedIntent(): PendingIntent {
@@ -136,7 +153,7 @@ class CallService : Service(), CallForegroundController {
         val text = if (useMicrophone) {
             getString(R.string.call_active)
         } else {
-            "Listening in call"
+            getString(R.string.call_listening)
         }
 
         val notification = NotificationCompat.Builder(this, CHANNEL_ID)
@@ -150,7 +167,7 @@ class CallService : Service(), CallForegroundController {
             .setSilent(true)
             .setPriority(NotificationCompat.PRIORITY_HIGH)
             .setContentIntent(openIntent)
-            .addAction(0, "OPEN", openIntent)
+            .addAction(0, getString(R.string.open_app), openIntent)
             .setDeleteIntent(dismissedIntent())
             .build()
 
@@ -162,10 +179,10 @@ class CallService : Service(), CallForegroundController {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             val channel = NotificationChannel(
                 CHANNEL_ID,
-                "Calls",
+                getString(R.string.calls_channel_name),
                 NotificationManager.IMPORTANCE_HIGH
             ).apply {
-                description = "Ongoing voice calls"
+                description = getString(R.string.calls_channel_description)
                 setSound(null, null)
                 enableVibration(false)
                 enableLights(false)

@@ -2,8 +2,6 @@ package com.decentralprospect.symposium
 
 import android.content.Context
 import android.os.SystemClock
-import android.util.Log
-import com.newrelic.agent.android.NewRelic
 import android.widget.Toast
 import java.util.Locale
 import java.util.UUID
@@ -28,72 +26,21 @@ internal fun CallRuntime.setExternalTelemetryEnabled(enabled: Boolean, showToast
     telemetryEnabledState = enabled
     persistTelemetryPrivacyPrefs()
 
-    if (enabled) {
-        startNewRelicTelemetry()
-        if (showToast) {
-            val message = if (newRelicShutdownInThisProcess) {
-                "Анонимная диагностика включится после перезапуска приложения"
-            } else {
-                "Анонимная диагностика включена"
-            }
-            Toast.makeText(appContext, message, Toast.LENGTH_SHORT).show()
-        }
-    } else {
-        shutdownNewRelicTelemetry()
-        if (showToast) {
-            Toast.makeText(appContext, "Анонимная диагностика выключена", Toast.LENGTH_SHORT).show()
-        }
+    if (showToast) {
+        val message = if (enabled) "Анонимная диагностика включена" else "Анонимная диагностика выключена"
+        Toast.makeText(appContext, tr(message), Toast.LENGTH_SHORT).show()
     }
 }
 
 internal fun CallRuntime.externalTelemetryActive(): Boolean {
-    return telemetryEnabledState && newRelicStarted && !newRelicShutdownInThisProcess
+    return privacyPrefs().getBoolean(PREF_TELEMETRY_ENABLED, false) &&
+        TelemetryClient.get(appContext).configured
 }
 
-internal fun CallRuntime.startNewRelicTelemetry() {
-    if (!telemetryEnabledState) return
-    if (newRelicStarted) return
-    if (newRelicShutdownInThisProcess) {
-        Log.w(TAG, "New Relic cannot be restarted in the same app lifecycle after shutdown")
-        return
-    }
-
-    val appToken = newRelicAppTokenFromBuildConfig()
-    if (appToken.isBlank()) {
-        Log.w(TAG, "New Relic app token is not configured in BuildConfig")
-        return
-    }
-
-    runCatching {
-        NewRelic.withApplicationToken(appToken)
-            .start(appContext)
-        newRelicStarted = true
-    }.onFailure { e ->
-        Log.w(TAG, "New Relic start failed: ${e.message}")
-    }
-}
-
-private fun newRelicAppTokenFromBuildConfig(): String {
-    return runCatching {
-        BuildConfig::class.java
-            .getField("NEW_RELIC_APP_TOKEN")
-            .get(null)
-            ?.toString()
-            ?.trim()
-            .orEmpty()
-    }.getOrDefault("")
-}
-
-internal fun CallRuntime.shutdownNewRelicTelemetry() {
-    if (!newRelicStarted || newRelicShutdownInThisProcess) return
-
-    runCatching {
-        NewRelic.shutdown()
-        newRelicStarted = false
-        newRelicShutdownInThisProcess = true
-    }.onFailure { e ->
-        Log.w(TAG, "New Relic shutdown failed: ${e.message}")
-    }
+internal fun CallRuntime.startTelemetry() {
+    loadTelemetryPrivacyPrefs()
+    val client = TelemetryClient.get(appContext)
+    client.sendLifecycleSignals()
 }
 
 internal fun CallRuntime.nrAttrs(vararg pairs: Pair<String, Any?>): Map<String, Any> {
@@ -122,7 +69,7 @@ internal fun CallRuntime.trackRtcEvent(
     val safeAttrs = sanitizeTelemetryAttrs(attrs)
     val baseAttrs = nrAttrs(
         "eventName" to name,
-        "appVersion" to APP_VERSION,
+        "appVersion" to APP_VERSION_NAME,
         "sessionId" to telemetrySessionId,
         "role" to localRole,
         "reconnectMode" to reconnectMode,
@@ -132,11 +79,7 @@ internal fun CallRuntime.trackRtcEvent(
         "subscribeIceState" to subscribeIceState
     )
 
-    runCatching {
-        NewRelic.recordCustomEvent("RtcEvent", name, baseAttrs + safeAttrs)
-    }.onFailure { e ->
-        Log.w(TAG, "New Relic custom event failed: ${e.message}")
-    }
+    TelemetryClient.get(appContext).recordDiagnostic(name, baseAttrs + safeAttrs)
 }
 
 internal fun CallRuntime.shouldSendImportantTelemetry(name: String, attrs: Map<String, Any>): Boolean {
@@ -312,7 +255,6 @@ internal fun CallRuntime.markConferenceConnected(reason: String) {
             )
         )
 
-        recordRtcMetric("Conference Connect Duration ms", connectDurationMs.toDouble())
     }
 
     if (reconnectStartedAtMs > 0L) {
@@ -368,8 +310,6 @@ internal fun CallRuntime.finishConferenceTelemetry(reason: String, normal: Boole
         )
     )
 
-    recordRtcMetric("Conference Duration ms", conferenceDurationMs.toDouble())
-    recordRtcMetric("Conference Max Ping ms", maxPingMsInSession.toDouble())
 }
 
 internal fun CallRuntime.noteAudioTelemetryError() {
@@ -386,15 +326,4 @@ internal fun CallRuntime.noteIceBadStateTelemetry() {
 
 internal fun CallRuntime.notePcBadStateTelemetry() {
     pcBadStateCountInSession += 1
-}
-
-internal fun CallRuntime.recordRtcMetric(name: String, value: Double) {
-    if (!externalTelemetryActive()) return
-    if (!value.isFinite()) return
-
-    runCatching {
-        NewRelic.recordMetric(name, "WebRTC", value)
-    }.onFailure { e ->
-        Log.w(TAG, "New Relic metric failed: ${e.message}")
-    }
 }

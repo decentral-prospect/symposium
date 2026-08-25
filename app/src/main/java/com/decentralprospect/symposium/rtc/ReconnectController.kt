@@ -3,6 +3,26 @@ package com.decentralprospect.symposium
 import android.os.SystemClock
 import android.util.Log
 import org.json.JSONObject
+import kotlin.random.Random
+
+internal fun reconnectDelayMs(completedAttempts: Int, jitterMs: Long): Long {
+    val boundedJitter = jitterMs.coerceIn(0L, RECONNECT_MAX_JITTER_MS)
+    if (completedAttempts <= 0) {
+        return RECONNECT_INITIAL_DELAY_MS + boundedJitter
+    }
+
+    val shift = (completedAttempts - 1).coerceIn(0, 4)
+    val exponential = (RECONNECT_BASE_DELAY_MS * (1L shl shift))
+        .coerceAtMost(RECONNECT_MAX_DELAY_MS)
+    return exponential + boundedJitter
+}
+
+internal fun randomizedReconnectDelayMs(completedAttempts: Int): Long {
+    return reconnectDelayMs(
+        completedAttempts,
+        Random.nextLong(RECONNECT_MAX_JITTER_MS + 1L)
+    )
+}
 
 internal fun CallRuntime.startPingLoop() {
     if (pingLoopRunning) return
@@ -86,17 +106,17 @@ internal fun CallRuntime.handlePong(seq: Long, sentAt: Long) {
 internal fun CallRuntime.startReconnectMode(reason: String = "unknown") {
     if (reconnectMode) return
     if (intentionalDisconnect) {
-        Log.d(TAG, "Skip reconnect after intentional disconnect: $reason")
+        debugLog(TAG, "Skip reconnect after intentional disconnect: $reason")
         return
     }
 
     if (lastWsUrl.isBlank() || lastTlsPin.isBlank()) {
-        Log.e(TAG, "No saved params for reconnect (host/pin missing)")
+        diagnosticError(TAG, "No saved params for reconnect (host/pin missing)")
         setStatus("offline")
         return
     }
 
-    Log.w(TAG, "=== ENTERING AUTO-RECONNECT MODE: $reason ===")
+    diagnosticWarning(TAG, "=== ENTERING AUTO-RECONNECT MODE: $reason ===")
     diagLog("Enter reconnect mode", reason)
     reconnectsInSession += 1
     reconnectStartedAtMs = SystemClock.elapsedRealtime()
@@ -118,12 +138,14 @@ internal fun CallRuntime.startReconnectMode(reason: String = "unknown") {
     teardown()
 
     reconnectHandler.removeCallbacksAndMessages(null)
-    reconnectHandler.post(reconnectRunnable)
+    val initialDelayMs = randomizedReconnectDelayMs(0)
+    diagLog("Schedule reconnect attempt", "delayMs=$initialDelayMs")
+    reconnectHandler.postDelayed(reconnectRunnable, initialDelayMs)
 }
 
 internal fun CallRuntime.stopReconnectMode() {
     if (!reconnectMode) return
-    Log.d(TAG, "=== EXIT AUTO-RECONNECT MODE ===")
+    debugLog(TAG, "=== EXIT AUTO-RECONNECT MODE ===")
     trackRtcEvent("reconnect.stopped")
     reconnectHandler.removeCallbacksAndMessages(null)
     reconnectMode = false
@@ -134,7 +156,7 @@ internal fun CallRuntime.stopReconnectMode() {
 
 internal fun CallRuntime.internalConnectWithSavedParams() {
     if (lastWsUrl.isBlank() || lastTlsPin.isBlank()) {
-        Log.e(TAG, "No saved params for reconnect (host/pin missing)")
+        diagnosticError(TAG, "No saved params for reconnect (host/pin missing)")
         stopReconnectMode()
         return
     }
@@ -144,6 +166,7 @@ internal fun CallRuntime.internalConnectWithSavedParams() {
         room = lastRoom,
         username = lastUsername,
         tlsPin = lastTlsPin,
-        modKey = lastModKey
+        modKey = lastModKey,
+        e2eeSecret = lastE2eeSecret
     )
 }

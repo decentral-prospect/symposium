@@ -10,10 +10,14 @@ import java.util.Locale
 
 internal fun CallRuntime.createSplitPeerConnections(iceServers: List<PeerConnection.IceServer>) {
     if (pcFactory == null) {
-        Log.e(TAG, "Cannot create peer connections: pcFactory is null")
+        diagnosticError(TAG, "Cannot create peer connections: pcFactory is null")
         return
     }
 
+    check(conferenceE2eeEnabled && conferenceE2eeKeyProvider != null) {
+        "conference E2EE must be configured before creating peer connections"
+    }
+    disposeE2eePeerCryptors()
     val config = createRtcConfiguration(iceServers)
     val publishGeneration = nextPublishGeneration()
     val subscribeGeneration = nextSubscribeGeneration()
@@ -39,7 +43,7 @@ internal fun CallRuntime.createSplitPeerConnections(iceServers: List<PeerConnect
         rtcController.setPeerConnection(subscribePeerConnection)
         diagState("Split PeerConnections created")
     }.onFailure {
-        Log.e(TAG, "Failed to create split peer connections: ${it.message}")
+        diagnosticError(TAG, "Failed to create split peer connections: ${it.message}")
         trackRtcEvent("rtc.peer_connection.create_failed", nrAttrs("message" to it.message))
     }
 }
@@ -96,7 +100,7 @@ internal fun CallRuntime.makePublishObserver(generation: Long): PeerConnection.O
 
         override fun onIceConnectionReceivingChange(receiving: Boolean) {
             if (!isCurrentPublishGeneration(generation)) return
-            Log.d(TAG, "Publish ICE receiving: $receiving")
+            debugLog(TAG, "Publish ICE receiving: $receiving")
         }
 
         override fun onConnectionChange(newState: PeerConnection.PeerConnectionState) {
@@ -174,12 +178,12 @@ internal fun CallRuntime.makePublishObserver(generation: Long): PeerConnection.O
 
         override fun onAddTrack(receiver: RtpReceiver, streams: Array<out org.webrtc.MediaStream>) {
             if (!isCurrentPublishGeneration(generation)) return
-            Log.w(TAG, "Unexpected remote track on publish PC")
+            diagnosticWarning(TAG, "Unexpected remote track on publish PC")
         }
 
         override fun onTrack(transceiver: RtpTransceiver) {
             if (!isCurrentPublishGeneration(generation)) return
-            Log.w(TAG, "Unexpected remote transceiver on publish PC")
+            diagnosticWarning(TAG, "Unexpected remote transceiver on publish PC")
         }
     }
 }
@@ -190,6 +194,8 @@ internal fun CallRuntime.rememberRemoteAudioTrack(track: org.webrtc.MediaStreamT
     remoteAudioTracks[track.id()] = track
     runCatching { track.setEnabled(outputEnabled) }
     diagLog("Remote audio track registered", "id=${track.id()} output=$outputEnabled")
+    applyPreferredAudioRoute("remote-audio-track")
+    schedulePreferredAudioRouteReapply("remote-audio-track")
 }
 
 internal fun CallRuntime.setRemoteAudioOutputEnabled(enabled: Boolean) {
@@ -255,7 +261,7 @@ internal fun CallRuntime.makeSubscribeObserver(generation: Long): PeerConnection
 
         override fun onIceConnectionReceivingChange(receiving: Boolean) {
             if (!isCurrentSubscribeGeneration(generation)) return
-            Log.d(TAG, "Subscribe ICE receiving: $receiving")
+            debugLog(TAG, "Subscribe ICE receiving: $receiving")
         }
 
         override fun onConnectionChange(newState: PeerConnection.PeerConnectionState) {
@@ -329,6 +335,11 @@ internal fun CallRuntime.makeSubscribeObserver(generation: Long): PeerConnection
         }
 
         override fun onAddTrack(receiver: RtpReceiver, streams: Array<out org.webrtc.MediaStream>) {
+            if (!isCurrentSubscribeGeneration(generation)) {
+                diagLog("Ignore stale subscribe onAddTrack")
+                return
+            }
+            if (!attachE2eeReceiverImmediately(receiver)) return
             postUi {
                 if (!isCurrentSubscribeGeneration(generation)) {
                     diagLog("Ignore stale subscribe onAddTrack")
@@ -340,6 +351,11 @@ internal fun CallRuntime.makeSubscribeObserver(generation: Long): PeerConnection
         }
 
         override fun onTrack(transceiver: RtpTransceiver) {
+            if (!isCurrentSubscribeGeneration(generation)) {
+                diagLog("Ignore stale subscribe onTrack")
+                return
+            }
+            if (!attachE2eeReceiverImmediately(transceiver.receiver)) return
             postUi {
                 if (!isCurrentSubscribeGeneration(generation)) {
                     diagLog("Ignore stale subscribe onTrack")
@@ -352,8 +368,33 @@ internal fun CallRuntime.makeSubscribeObserver(generation: Long): PeerConnection
     }
 }
 
+private fun CallRuntime.attachE2eeReceiverImmediately(receiver: RtpReceiver): Boolean {
+    return runCatching {
+        attachE2eeReceiver(receiver)
+        true
+    }.onFailure { error ->
+        // Without an encoded-frame transformer WebRTC would accept plaintext.
+        // Disable the track synchronously, then terminate the compromised
+        // receive pipeline on the UI thread.
+        runCatching { receiver.track()?.setEnabled(false) }
+        conferenceE2eeLastError = "receiver setup: ${error.message}"
+        diagnosticError(TAG, "Failed to attach E2EE receiver: ${error.message}")
+        postUi {
+            setStatus("E2EE receiver failed")
+            intentionalDisconnect = true
+            teardown()
+        }
+    }.getOrDefault(false)
+}
+
 internal fun CallRuntime.markMediaOnline(reason: String) {
-    if (mediaOnline) return
+    if (mediaOnline) {
+        postUi {
+            applyPreferredAudioRoute("media-ready:$reason")
+            schedulePreferredAudioRouteReapply("media-ready:$reason")
+        }
+        return
+    }
     mediaOnline = true
     markConferenceConnected(reason)
     postUi {
@@ -361,6 +402,7 @@ internal fun CallRuntime.markMediaOnline(reason: String) {
         setStatus("online")
         acquirePartialWakeLock()
         applyPreferredAudioRoute("media-online:$reason")
+        schedulePreferredAudioRouteReapply("media-online:$reason")
         startWakeLockRefresh()
         startStatsPolling()
         diagState("Media online: $reason")

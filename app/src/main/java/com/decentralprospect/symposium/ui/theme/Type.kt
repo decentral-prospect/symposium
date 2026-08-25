@@ -5,6 +5,7 @@ import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.Font
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.unit.sp
 import com.decentralprospect.symposium.R
 
 val Dos2000FontFamily = FontFamily(
@@ -19,26 +20,31 @@ val RobotoFontFamily = FontFamily(
     Font(R.font.roboto_w850, weight = FontWeight.ExtraBold)
 )
 
-private val BaseTypography = MaterialTypography()
-
 val Typography = MaterialTypography(
-    displayLarge = BaseTypography.displayLarge.withAppFont(),
-    displayMedium = BaseTypography.displayMedium.withAppFont(),
-    displaySmall = BaseTypography.displaySmall.withAppFont(),
-    headlineLarge = BaseTypography.headlineLarge.withAppFont(),
-    headlineMedium = BaseTypography.headlineMedium.withAppFont(),
-    headlineSmall = BaseTypography.headlineSmall.withAppFont(),
-    titleLarge = BaseTypography.titleLarge.withAppFont(),
-    titleMedium = BaseTypography.titleMedium.withAppFont(),
-    titleSmall = BaseTypography.titleSmall.withAppFont(),
-    bodyLarge = BaseTypography.bodyLarge.withAppFont(),
-    bodyMedium = BaseTypography.bodyMedium.withAppFont(),
-    bodySmall = BaseTypography.bodySmall.withAppFont(),
-    labelLarge = BaseTypography.labelLarge.withAppFont(),
-    labelMedium = BaseTypography.labelMedium.withAppFont(),
-    labelSmall = BaseTypography.labelSmall.withAppFont()
+    displayLarge = appTextStyle(24, FontWeight.Medium, 30),
+    displayMedium = appTextStyle(24, FontWeight.Medium, 30),
+    displaySmall = appTextStyle(24, FontWeight.Medium, 30),
+    headlineLarge = appTextStyle(24, FontWeight.Medium, 30),
+    headlineMedium = appTextStyle(18, FontWeight.Bold, 24),
+    headlineSmall = appTextStyle(16, FontWeight.Normal, 22),
+    titleLarge = appTextStyle(18, FontWeight.Bold, 24),
+    titleMedium = appTextStyle(16, FontWeight.Medium, 22),
+    titleSmall = appTextStyle(14, FontWeight.Medium, 20),
+    bodyLarge = appTextStyle(16, FontWeight.Normal, 24),
+    bodyMedium = appTextStyle(16, FontWeight.Normal, 22),
+    bodySmall = appTextStyle(14, FontWeight.Normal, 20),
+    labelLarge = appTextStyle(16, FontWeight.Medium, 22),
+    labelMedium = appTextStyle(14, FontWeight.Medium, 20),
+    labelSmall = appTextStyle(12, FontWeight.Medium, 16)
 )
 
-private fun TextStyle.withAppFont(): TextStyle = copy(
-    fontFamily = RobotoFontFamily
+private fun appTextStyle(
+    size: Int,
+    weight: FontWeight,
+    lineHeight: Int
+): TextStyle = TextStyle(
+    fontFamily = RobotoFontFamily,
+    fontWeight = weight,
+    fontSize = size.sp,
+    lineHeight = lineHeight.sp
 )

@@ -116,7 +116,7 @@ class RtcTrackNegotiationController(
         prevOutboundDur = null
 
         if (username.isNotBlank()) {
-            Log.d(TAG, "Prepare connect as username=$username")
+            debugLog(TAG, "Prepare connect as username=$username")
         }
         publishPeerPresence()
     }
@@ -243,7 +243,7 @@ class RtcTrackNegotiationController(
 
         applyPeerPresence(owner, null, null)
 
-        Log.d(
+        debugLog(
             TAG,
             "Announced remote track owner=$owner trackKey=${trackKey.orEmpty()} trackId=${trackId.orEmpty()} kind=${kind.orEmpty()} stream=${streamId.orEmpty()}"
         )
@@ -429,7 +429,7 @@ class RtcTrackNegotiationController(
         val mediaTrack = track ?: return
         val trackId = mediaTrack.safeId()
         if (trackId.isNullOrBlank()) {
-            Log.w(TAG, "Remote track without id")
+            diagnosticWarning(TAG, "Remote track without id")
             return
         }
 
@@ -441,7 +441,7 @@ class RtcTrackNegotiationController(
 
         val ownerId = resolveOwnerId(trackId, streamOwner, previousOwner)
         if (ownerId == null) {
-            Log.w(TAG, "Remote ${mediaTrack.kind()} track is not mapped yet: receiver=$receiverId track=$trackId stream=$streamOwner")
+            diagnosticWarning(TAG, "Remote ${mediaTrack.kind()} track is not mapped yet: receiver=$receiverId track=$trackId stream=$streamOwner")
             return
         }
 
@@ -468,7 +468,7 @@ class RtcTrackNegotiationController(
                     streamId = streamOwner
                 )
                 if (setPeerAudioAttachment(ownerId, true)) publishPeerPresence()
-                Log.d(TAG, "Remote audio receiver=$receiverId track=$trackId owner=$ownerId stream=$streamOwner")
+                debugLog(TAG, "Remote audio receiver=$receiverId track=$trackId owner=$ownerId stream=$streamOwner")
             }
 
             "video" -> {
@@ -498,10 +498,10 @@ class RtcTrackNegotiationController(
 
                 if (setPeerVideoAttachment(ownerId, true)) publishPeerPresence()
 
-                Log.d(TAG, "Remote video receiver=$receiverId track=$trackId owner=$ownerId stream=$streamOwner")
+                debugLog(TAG, "Remote video receiver=$receiverId track=$trackId owner=$ownerId stream=$streamOwner")
             }
 
-            else -> Log.w(TAG, "Unknown remote media kind=${mediaTrack.kind()} track=$trackId")
+            else -> diagnosticWarning(TAG, "Unknown remote media kind=${mediaTrack.kind()} track=$trackId")
         }
     }
 
@@ -841,42 +841,42 @@ class RtcTrackNegotiationController(
 
     fun onSignalingStateChanged(newState: PeerConnection.SignalingState) {
         checkThread()
-        Log.d(TAG, "Ignoring legacy signaling state callback in split-PC controller: $newState")
+        debugLog(TAG, "Ignoring legacy signaling state callback in split-PC controller: $newState")
     }
 
     fun onIceFailed() {
         checkThread()
-        Log.d(TAG, "Ignoring legacy ICE restart request in split-PC controller")
+        debugLog(TAG, "Ignoring legacy ICE restart request in split-PC controller")
     }
 
     fun onServerRenegotiate() {
         checkThread()
-        Log.d(TAG, "Ignoring legacy server-renegotiate in split-PC controller")
+        debugLog(TAG, "Ignoring legacy server-renegotiate in split-PC controller")
     }
 
     fun handleRemoteAnswerSdp(sdp: String) {
         checkThread()
-        Log.w(TAG, "Ignoring legacy remote answer in split-PC controller")
+        diagnosticWarning(TAG, "Ignoring legacy remote answer in split-PC controller")
     }
 
     fun handleRemoteOfferSdp(sdp: String) {
         checkThread()
-        Log.w(TAG, "Ignoring legacy remote offer in split-PC controller")
+        diagnosticWarning(TAG, "Ignoring legacy remote offer in split-PC controller")
     }
 
     fun addOrQueueRemoteIce(candidate: org.webrtc.IceCandidate) {
         checkThread()
-        Log.w(TAG, "Ignoring legacy untargeted ICE in split-PC controller")
+        diagnosticWarning(TAG, "Ignoring legacy untargeted ICE in split-PC controller")
     }
 
     fun requestNegotiation(reason: String, iceRestart: Boolean = false) {
         checkThread()
-        Log.d(TAG, "Ignoring legacy negotiation request in split-PC controller: reason=$reason iceRestart=$iceRestart")
+        debugLog(TAG, "Ignoring legacy negotiation request in split-PC controller: reason=$reason iceRestart=$iceRestart")
     }
 
     private fun checkThread() {
         if (Thread.currentThread() !== ownerThread) {
-            Log.w(TAG, "Called from unexpected thread: ${Thread.currentThread().name}, expected=${ownerThread.name}")
+            diagnosticWarning(TAG, "Called from unexpected thread: ${Thread.currentThread().name}, expected=${ownerThread.name}")
         }
     }
 

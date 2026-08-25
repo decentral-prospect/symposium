@@ -23,12 +23,21 @@ internal fun CallRuntime.connect(
     room: String,
     username: String,
     tlsPin: String,
-    modKey: String = ""
+    modKey: String = "",
+    e2eeSecret: String
 ) {
     intentionalDisconnect = false
 
+    val cleanE2eeSecret = try {
+        normalizeConferenceE2eeSecret(e2eeSecret)
+    } catch (error: Throwable) {
+        setStatus("Invalid E2EE key")
+        diagnosticError(TAG, "Invalid conference E2EE key: ${error.message}")
+        return
+    }
+
     if (webSocket != null || publishPeerConnection != null || subscribePeerConnection != null) {
-        Log.w(TAG, "connect(): stale session detected -> forcing teardown before new connect")
+        diagnosticWarning(TAG, "connect(): stale session detected -> forcing teardown before new connect")
         teardown()
     }
 
@@ -37,16 +46,13 @@ internal fun CallRuntime.connect(
     }
 
     if (!reconnectMode) setStatus("connecting…")
-    startCallService(microphone = false)
+    if (!reconnectMode) {
+        startCallService(microphone = false)
+    }
 
     val am = callAudioManager()
-    configureCallAudioMode(am)
-    runCatching { am.isSpeakerphoneOn = false }
-    preferredAudioRoute = bestNonSpeakerAudioRoute(am)
-    currentAudioRoute = preferredAudioRoute
-    speakerphoneOn = false
-    setSpeakerState(false)
-    publishAudioRouteToUi()
+    preferredAudioRoute = defaultCallAudioRoute(am)
+    setAudioRoute(preferredAudioRoute, "connect-start")
 
     val hp = parseHostPort(url)
     val host = hp.host
@@ -56,11 +62,19 @@ internal fun CallRuntime.connect(
         normalizeTlsPin(tlsPin)
     } catch (e: Throwable) {
         setStatus("Invalid TLS pin")
-        Log.e(TAG, "Invalid TLS pin: ${e.message}")
+        diagnosticError(TAG, "Invalid TLS pin: ${e.message}")
         return
     }
 
     val cleanModKey = modKey.trim()
+    try {
+        configureConferenceE2ee(cleanE2eeSecret)
+    } catch (error: Throwable) {
+        setStatus("E2EE initialization failed")
+        diagnosticError(TAG, "Conference E2EE initialization failed: ${error.message}")
+        teardown()
+        return
+    }
     localRole = if (cleanModKey.isNotBlank()) ROLE_MODERATOR else ROLE_GUEST
     lobbyWaiting = false
     forcedMutedByModerator = false
@@ -74,6 +88,7 @@ internal fun CallRuntime.connect(
     lastUsername = username
     lastTlsPin = pin
     lastModKey = cleanModKey
+    lastE2eeSecret = cleanE2eeSecret
     selfUsername = username.trim()
 
     resetLocalTrackNamespace()
@@ -135,7 +150,7 @@ internal fun CallRuntime.connect(
                         "httpCode" to response?.code
                     )
                 )
-                Log.e(TAG, "WSS failure: ${t.message}")
+                diagnosticError(TAG, "WSS failure: ${t.message}")
 
                 webSocket = null
                 setConnected(false)
@@ -156,7 +171,7 @@ internal fun CallRuntime.connect(
         }
 
         override fun onClosing(ws: WebSocket, code: Int, reason: String) {
-            Log.d(TAG, "WSS closing: $code $reason")
+            debugLog(TAG, "WSS closing: $code $reason")
         }
 
         override fun onClosed(ws: WebSocket, code: Int, reason: String) {
@@ -184,13 +199,14 @@ internal fun CallRuntime.connect(
                 stopStatsPolling()
                 stopPingLoop()
 
-                val normalClose = code == 1000
-
-                if (intentionalDisconnect || normalClose) {
+                if (intentionalDisconnect) {
                     teardown()
                     return@postUi
                 }
 
+                // A relay restart or a server-side peer cleanup can use a normal
+                // WebSocket close code. Only an explicit local/room termination is
+                // terminal; every other close must recover.
                 if (reconnectMode) {
                     teardown()
                 } else {
@@ -217,6 +233,13 @@ internal fun CallRuntime.handleSignalingMessage(text: String) {
             "lobby-approve" -> handleLobbyApproved(msg)
             "lobby-reject" -> handleLobbyRejected(msg)
             "kick" -> handleKicked(msg)
+            "room-closed" -> {
+                val reason = msg.optString("reason").ifBlank { "Комната закрыта" }
+                Toast.makeText(appContext, tr(reason), Toast.LENGTH_SHORT).show()
+                diagLog("Room closed by server", reason)
+                intentionalDisconnect = true
+                teardown()
+            }
             "peer-kicked" -> {
                 val targetId = msg.optString("targetPeerId").ifBlank { msg.optString("peerId") }
                 if (targetId.isNotBlank()) {
@@ -236,7 +259,7 @@ internal fun CallRuntime.handleSignalingMessage(text: String) {
             "trickle" -> handleRemoteTrickle(msg)
             "iceComplete" -> {
                 val target = msg.optString("target", "")
-                Log.d(TAG, "Server ICE completed target=$target")
+                debugLog(TAG, "Server ICE completed target=$target")
             }
             "peers" -> {
                 val peers = msg.optJSONArray("peers")
@@ -275,7 +298,7 @@ internal fun CallRuntime.handleSignalingMessage(text: String) {
                     kind = msg.optString("kind"),
                     streamId = msg.optString("streamId")
                 )
-                Log.d(TAG, "Track published owner=${msg.optString("peerId")} track=${msg.optString("trackId")} kind=${msg.optString("kind")}")
+                debugLog(TAG, "Track published owner=${msg.optString("peerId")} track=${msg.optString("trackId")} kind=${msg.optString("kind")}")
             }
             "track-unpublished" -> {
                 rtcController.onTrackUnpublished(
@@ -285,7 +308,7 @@ internal fun CallRuntime.handleSignalingMessage(text: String) {
                     trackId = msg.optString("trackId"),
                     kind = msg.optString("kind")
                 )
-                Log.d(TAG, "Track unpublished owner=${msg.optString("peerId")} track=${msg.optString("trackId")} kind=${msg.optString("kind")}")
+                debugLog(TAG, "Track unpublished owner=${msg.optString("peerId")} track=${msg.optString("trackId")} kind=${msg.optString("kind")}")
             }
             "pong" -> {
                 val seq = msg.optLong("seq")
@@ -295,15 +318,15 @@ internal fun CallRuntime.handleSignalingMessage(text: String) {
             "error" -> {
                 val err = msg.optString("error")
                 setStatus("server error")
-                Log.e(TAG, "Server error: $err")
+                diagnosticError(TAG, "Server error: $err")
             }
             "answer", "offer", "renegotiate" -> {
-                Log.w(TAG, "Ignoring legacy signaling message: ${msg.optString("type")}")
+                diagnosticWarning(TAG, "Ignoring legacy signaling message: ${msg.optString("type")}")
             }
-            else -> Log.d(TAG, "WS unknown: ${compactJson(msg)}")
+            else -> debugLog(TAG, "WS unknown: ${compactJson(msg)}")
         }
     } catch (e: Throwable) {
-        Log.e(TAG, "WS parse error: ${e.message}")
+        diagnosticError(TAG, "WS parse error: ${e.message}")
     }
 }
 
@@ -355,15 +378,15 @@ internal fun CallRuntime.handleLobbyApproved(msg: JSONObject) {
 }
 
 internal fun CallRuntime.handleLobbyRejected(msg: JSONObject) {
-    val reason = msg.optString("reason").ifBlank { "Rejected by moderator" }
-    Toast.makeText(appContext, reason, Toast.LENGTH_SHORT).show()
+    val reason = msg.optString("reason").ifBlank { "Отклонено модератором" }
+    Toast.makeText(appContext, tr(reason), Toast.LENGTH_SHORT).show()
     diagLog("Lobby rejected", reason)
     disconnect()
 }
 
 internal fun CallRuntime.handleKicked(msg: JSONObject) {
-    val reason = msg.optString("reason").ifBlank { "Kicked by moderator" }
-    Toast.makeText(appContext, reason, Toast.LENGTH_SHORT).show()
+    val reason = msg.optString("reason").ifBlank { "Удалено модератором" }
+    Toast.makeText(appContext, tr(reason), Toast.LENGTH_SHORT).show()
     diagLog("Kicked", reason)
     disconnect()
 }
@@ -538,13 +561,13 @@ internal fun CallRuntime.applyForcedMuteFromServer(enabled: Boolean, reason: Str
         runCatching { localAudioTrack?.setEnabled(false) }
         setMicUi()
         sendSelfMediaState(audioEnabled = false)
-        Toast.makeText(appContext, "Микрофон выключен модератором", Toast.LENGTH_SHORT).show()
+        Toast.makeText(appContext, tr("Микрофон выключен модератором"), Toast.LENGTH_SHORT).show()
     } else {
         postUi { uiStateBinder?.setForcedMute(false) }
         runCatching { localAudioTrack?.setEnabled(micEnabledState) }
 
         if (changed) {
-            Toast.makeText(appContext, "Модератор разрешил включить микрофон", Toast.LENGTH_SHORT).show()
+            Toast.makeText(appContext, tr("Модератор разрешил включить микрофон"), Toast.LENGTH_SHORT).show()
         }
     }
 
@@ -701,7 +724,7 @@ internal fun CallRuntime.sendWS(obj: JSONObject) {
     val sent = webSocket?.send(obj.toString())
     if (sent != true) {
         diagLog("WS send failed", "webSocket is null or send=false type=$type")
-        Log.w(TAG, "Cannot send WS message: webSocket is null or send=false")
+        diagnosticWarning(TAG, "Cannot send WS message: webSocket is null or send=false")
     }
 }
 
@@ -709,10 +732,10 @@ internal abstract class SimpleSdpObserver(private val label: String) : SdpObserv
     override fun onCreateSuccess(desc: SessionDescription?) {}
     override fun onSetSuccess() {}
     override fun onCreateFailure(error: String?) {
-        Log.e(TAG, "$label create failure: $error")
+        diagnosticError(TAG, "$label create failure: $error")
     }
     override fun onSetFailure(error: String?) {
-        Log.e(TAG, "$label set failure: $error")
+        diagnosticError(TAG, "$label set failure: $error")
     }
 }
 
@@ -746,11 +769,11 @@ internal fun SessionDescription.Type.canonicalForm(): String {
 
 internal fun CallRuntime.schedulePublishNegotiation(reason: String) {
     if (!joinedRoom) {
-        Log.d(TAG, "Skip publish negotiation before join: $reason")
+        debugLog(TAG, "Skip publish negotiation before join: $reason")
         return
     }
     if (publishPeerConnection == null) {
-        Log.w(TAG, "Skip publish negotiation, publish PC is null: $reason")
+        diagnosticWarning(TAG, "Skip publish negotiation, publish PC is null: $reason")
         return
     }
 
@@ -771,13 +794,13 @@ internal fun CallRuntime.flushPublishNegotiation(reason: String) {
 
     if (publishMakingOffer) {
         publishPendingOffer = true
-        Log.d(TAG, "Publish offer already in progress; mark pending: $reason")
+        debugLog(TAG, "Publish offer already in progress; mark pending: $reason")
         return
     }
 
     if (pc.signalingState() != PeerConnection.SignalingState.STABLE) {
         publishPendingOffer = true
-        Log.d(TAG, "Publish PC not stable (${pc.signalingState()}); delay offer")
+        debugLog(TAG, "Publish PC not stable (${pc.signalingState()}); delay offer")
         publishNegotiationHandler.postDelayed({ flushPublishNegotiation("wait-stable") }, 150L)
         return
     }
@@ -830,7 +853,7 @@ internal fun CallRuntime.flushPublishNegotiation(reason: String) {
 internal fun CallRuntime.handlePublishAnswer(msg: JSONObject) {
     val pc = publishPeerConnection ?: return
     val sdpObj = msg.optJSONObject("sdp") ?: run {
-        Log.e(TAG, "publishAnswer missing sdp")
+        diagnosticError(TAG, "publishAnswer missing sdp")
         publishMakingOffer = false
         return
     }
@@ -893,11 +916,11 @@ internal fun CallRuntime.handleSubscribeOffer(msg: JSONObject) {
     subscribeProtocolGeneration = generation
 
     val pc = subscribePeerConnection ?: run {
-        Log.e(TAG, "subscribeOffer received but subscribe PC is null")
+        diagnosticError(TAG, "subscribeOffer received but subscribe PC is null")
         return
     }
     val sdpObj = msg.optJSONObject("sdp") ?: run {
-        Log.e(TAG, "subscribeOffer missing sdp")
+        diagnosticError(TAG, "subscribeOffer missing sdp")
         return
     }
     val revision = msg.optLong("revision", -1L)
@@ -1012,7 +1035,7 @@ internal fun CallRuntime.handleRemoteTrickle(msg: JSONObject) {
             addOrQueueRemoteIce(TARGET_SUBSCRIBE, cand, generation)
         }
         else -> {
-            Log.w(TAG, "Remote ICE without target; applying fallback to subscribe")
+            diagnosticWarning(TAG, "Remote ICE without target; applying fallback to subscribe")
             if (shouldDropSubscribeGeneration(generation, "remote-ice-fallback")) return
             addOrQueueRemoteIce(TARGET_SUBSCRIBE, cand, generation)
         }
@@ -1056,7 +1079,7 @@ internal fun CallRuntime.addOrQueueRemoteIce(target: String, cand: IceCandidate,
     runCatching {
         pc.addIceCandidate(cand)
     }.onFailure {
-        Log.w(TAG, "addIceCandidate failed target=$target generation=$generation: ${it.message}")
+        diagnosticWarning(TAG, "addIceCandidate failed target=$target generation=$generation: ${it.message}")
     }
 }
 
@@ -1092,7 +1115,7 @@ internal fun CallRuntime.drainQueuedRemoteIce(target: String) {
 
         runCatching { pc.addIceCandidate(item.candidate) }
             .onFailure {
-                Log.w(
+                diagnosticWarning(
                     TAG,
                     "drain addIceCandidate failed target=$target generation=${item.generation}: ${it.message}"
                 )
@@ -1103,7 +1126,7 @@ internal fun CallRuntime.drainQueuedRemoteIce(target: String) {
 
 internal fun CallRuntime.sendLocalIce(target: String, candidate: IceCandidate, generation: Long = 0L) {
     if (candidate.sdp.isBlank()) {
-        Log.d(TAG, "Local ICE complete target=$target")
+        debugLog(TAG, "Local ICE complete target=$target")
         return
     }
 
@@ -1179,7 +1202,7 @@ internal fun CallRuntime.schedulePublishIceRestart(reason: String) {
         runCatching {
             pc.restartIce()
         }.onFailure {
-            Log.w(TAG, "publish restartIce failed: ${it.message}")
+            diagnosticWarning(TAG, "publish restartIce failed: ${it.message}")
         }
 
         schedulePublishNegotiation("ice-restart:$reason")

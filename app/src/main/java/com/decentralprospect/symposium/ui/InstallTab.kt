@@ -5,12 +5,15 @@ import android.content.ClipboardManager
 import android.content.Context
 import android.widget.Toast
 import androidx.activity.compose.BackHandler
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.animateContentSize
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -19,6 +22,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -29,13 +33,16 @@ import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Edit
+import androidx.compose.material.icons.filled.GridView
+import androidx.compose.material.icons.filled.KeyboardArrowDown
+import androidx.compose.material.icons.filled.KeyboardArrowUp
+import androidx.compose.material.icons.filled.MeetingRoom
 import androidx.compose.material.icons.filled.QrCode2
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
-import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -48,13 +55,11 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.text.SpanStyle
-import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.style.TextOverflow
-import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import kotlinx.coroutines.Dispatchers
@@ -81,12 +86,14 @@ fun InstallTab(
     onObserveSshHostKeyPin: suspend (ip: String) -> String,
     onProbeServer: suspend (ip: String, login: String, password: String, expectedSshHostKeyPin: String?) -> RemoteInstaller.ProbeResult,
     onSetRoomOpenState: suspend (ip: String, httpsPort: Int?, relayTlsPin: String?, adminToken: String?, roomName: String, open: Boolean) -> RemoteInstaller.RoomAdminResult,
+    onRotateModeratorKey: suspend (ip: String, httpsPort: Int?, relayTlsPin: String?, adminToken: String?, roomName: String) -> RemoteInstaller.RoomAdminResult,
     onFetchOpenRooms: suspend (ip: String, httpsPort: Int?, relayTlsPin: String?, adminToken: String?) -> RemoteInstaller.RoomAdminResult,
     onFetchRelayVersion: suspend (ip: String, httpsPort: Int?, relayTlsPin: String?, adminToken: String?) -> RemoteInstaller.RelayVersionResult
 ) {
     val context = LocalContext.current
     val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
     val store = remember(context) { InstallServersStore(context) }
+    val conferenceE2eeSecrets = remember(context) { ConferenceE2eeSecretStore(context) }
     val servers = remember { mutableStateListOf<InstallServer>() }
     val installScope = rememberCoroutineScope()
     val installLogListState = rememberLazyListState()
@@ -117,6 +124,7 @@ fun InstallTab(
     var showAddRoomDialog by remember { mutableStateOf(false) }
     var roomDialogName by remember { mutableStateOf("") }
     var roomActionLoading by remember { mutableStateOf(false) }
+    var pendingModeratorLinkRotationRoom by remember { mutableStateOf<String?>(null) }
     var pendingDeleteServerId by remember { mutableStateOf<String?>(null) }
     var removingRelay by remember { mutableStateOf(false) }
     var updatingRelay by remember { mutableStateOf(false) }
@@ -125,13 +133,17 @@ fun InstallTab(
 
     var serverParamsExpanded by remember(selectedServerId) { mutableStateOf(false) }
     var roomsExpanded by remember(selectedServerId) { mutableStateOf(false) }
+    var expandedRoomName by remember(selectedServerId) { mutableStateOf<String?>(null) }
 
     val selectedServer = servers.firstOrNull { it.id == selectedServerId }
     val pendingDeleteServer = servers.firstOrNull { it.id == pendingDeleteServerId }
 
-    BackHandler(enabled = fieldEditorTitle != null || showAddRoomDialog || pendingDeleteServer != null || pendingSshHostKeyTrust != null || qrDialogLink != null || view != InstallView.GRID) {
+    BackHandler(enabled = fieldEditorTitle != null || showAddRoomDialog || pendingModeratorLinkRotationRoom != null || pendingDeleteServer != null || pendingSshHostKeyTrust != null || qrDialogLink != null || view != InstallView.GRID) {
         when {
             qrDialogLink != null -> qrDialogLink = null
+            pendingModeratorLinkRotationRoom != null -> {
+                if (!roomActionLoading) pendingModeratorLinkRotationRoom = null
+            }
             pendingSshHostKeyTrust != null -> {
                 pendingSshHostKeyTrust = null
                 addLoading = false
@@ -185,7 +197,7 @@ fun InstallTab(
 
     fun copyToClipboard(label: String, value: String) {
         clipboard.setPrimaryClip(ClipData.newPlainText(label, value))
-        Toast.makeText(context, "Скопировано", Toast.LENGTH_SHORT).show()
+        Toast.makeText(context, tr("Скопировано"), Toast.LENGTH_SHORT).show()
     }
 
     fun updateServer(updated: InstallServer) {
@@ -737,10 +749,51 @@ fun InstallTab(
                     adminToken = r.relayInfo?.adminToken ?: current.adminToken
                 )
             }
+            if (open) {
+                conferenceE2eeSecrets.rotate(server.ip, server.httpsPort, name)
+            } else {
+                conferenceE2eeSecrets.remove(server.ip, server.httpsPort, name)
+            }
             installError = null
             roomActionName = ""
             roomActionLoading = false
             onSuccess?.invoke()
+        }
+    }
+
+    fun rotateModeratorLink(server: InstallServer, roomName: String) {
+        if (roomActionLoading || !server.installed) return
+        roomActionLoading = true
+        roomActionName = roomName
+        installScope.launch {
+            val result = runCatching {
+                onRotateModeratorKey(
+                    server.ip,
+                    server.httpsPort,
+                    server.relayTlsPin,
+                    server.adminToken,
+                    roomName
+                )
+            }
+            val rotated = result.getOrElse {
+                installError = it.message ?: "Не удалось обновить ссылку модератора"
+                roomActionLoading = false
+                pendingModeratorLinkRotationRoom = null
+                return@launch
+            }
+            updateServer(server.id) { current ->
+                current.copy(
+                    openRooms = rotated.openRooms,
+                    relayTlsPin = rotated.relayInfo?.pin ?: current.relayTlsPin,
+                    httpsPort = rotated.relayInfo?.httpsPort ?: current.httpsPort,
+                    adminToken = rotated.relayInfo?.adminToken ?: current.adminToken
+                )
+            }
+            installError = null
+            roomActionName = ""
+            roomActionLoading = false
+            pendingModeratorLinkRotationRoom = null
+            Toast.makeText(context, tr("Ссылка модератора обновлена"), Toast.LENGTH_SHORT).show()
         }
     }
 
@@ -770,37 +823,55 @@ fun InstallTab(
     fun guestLink(server: InstallServer, room: OpenRoomInfo): String? {
         val pin = server.relayTlsPin?.trim()
         if (pin.isNullOrBlank()) return null
-        return buildConnectHttpRedirectLink(server.ip, server.httpsPort, room.name, pin)
+        val e2eeSecret = conferenceE2eeSecrets.getOrCreate(server.ip, server.httpsPort, room.name)
+        return buildConnectHttpRedirectLink(server.ip, server.httpsPort, room.name, pin, e2eeSecret)
     }
 
     fun guestQrLink(server: InstallServer, room: OpenRoomInfo): String? {
         val pin = server.relayTlsPin?.trim()
         if (pin.isNullOrBlank()) return null
-        return buildConnectDeepLink(server.ip, server.httpsPort, room.name, pin)
+        val e2eeSecret = conferenceE2eeSecrets.getOrCreate(server.ip, server.httpsPort, room.name)
+        return buildConnectDeepLink(server.ip, server.httpsPort, room.name, pin, e2eeSecret)
     }
 
     fun moderatorLink(server: InstallServer, room: OpenRoomInfo): String? {
         val pin = server.relayTlsPin?.trim()
         val modKey = room.moderatorKey.trim()
         if (pin.isNullOrBlank() || modKey.isBlank()) return null
-        return buildConnectDeepLink(server.ip, server.httpsPort, room.name, pin, moderatorKey = modKey)
+        val e2eeSecret = conferenceE2eeSecrets.getOrCreate(server.ip, server.httpsPort, room.name)
+        return buildConnectDeepLink(
+            server.ip,
+            server.httpsPort,
+            room.name,
+            pin,
+            e2eeSecret,
+            moderatorKey = modKey
+        )
     }
 
     fun moderatorQrLink(server: InstallServer, room: OpenRoomInfo): String? {
         val pin = server.relayTlsPin?.trim()
         val modKey = room.moderatorKey.trim()
         if (pin.isNullOrBlank() || modKey.isBlank()) return null
-        return buildConnectDeepLink(server.ip, server.httpsPort, room.name, pin, moderatorKey = modKey)
+        val e2eeSecret = conferenceE2eeSecrets.getOrCreate(server.ip, server.httpsPort, room.name)
+        return buildConnectDeepLink(
+            server.ip,
+            server.httpsPort,
+            room.name,
+            pin,
+            e2eeSecret,
+            moderatorKey = modKey
+        )
     }
 
     fun missingPinError() {
         installError = "Переустановите SymposiumRelay."
-        Toast.makeText(context, "TLS pin отсутствует", Toast.LENGTH_SHORT).show()
+        Toast.makeText(context, tr("TLS pin отсутствует"), Toast.LENGTH_SHORT).show()
     }
 
     fun missingModKeyError() {
         installError = "Пересоздайте комнату"
-        Toast.makeText(context, "Нет moderator_key", Toast.LENGTH_SHORT).show()
+        Toast.makeText(context, tr("Нет moderator_key"), Toast.LENGTH_SHORT).show()
     }
 
     pendingSshHostKeyTrust?.let { trust ->
@@ -822,7 +893,7 @@ fun InstallTab(
                         .fillMaxWidth()
                         .clip(InnerCardShape)
                         .background(appSurfaceElevatedColor())
-                        .border(1.dp, appBorderColor(), InnerCardShape)
+                        .border(1.dp, Color.Transparent, InnerCardShape)
                         .padding(12.dp)
                 ) {
                     Text(
@@ -901,6 +972,35 @@ fun InstallTab(
                     showAddRoomDialog = false
                     roomDialogName = ""
                 }
+            }
+        )
+    }
+
+    if (pendingModeratorLinkRotationRoom != null && selectedServer != null) {
+        val roomName = pendingModeratorLinkRotationRoom.orEmpty()
+        AppDialog(
+            title = "Обновить ссылку модератора?",
+            onDismiss = {
+                if (!roomActionLoading) pendingModeratorLinkRotationRoom = null
+            },
+            dismissEnabled = !roomActionLoading,
+            content = {
+                Text(
+                    text = "Старая ссылка комнаты \"$roomName\" перестанет работать. Активные модераторы будут отключены; гости останутся в комнате.",
+                    color = appTextPrimaryColor(),
+                    fontSize = 14.sp,
+                    lineHeight = 19.sp
+                )
+            },
+            actions = {
+                ActionButton(
+                    label = "Обновить ссылку",
+                    onClick = { rotateModeratorLink(selectedServer, roomName) },
+                    kind = ActionButtonKind.DANGER,
+                    enabled = !roomActionLoading,
+                    loading = roomActionLoading,
+                    modifier = Modifier.weight(1f)
+                )
             }
         )
     }
@@ -1088,7 +1188,8 @@ fun InstallTab(
                                     label = serverStateLabel(server),
                                     color = serverStateColor(server)
                                 )
-                            }
+                            },
+                            backgroundColor = appSurfaceElevatedColor()
                         ) {
                             Text(
                                 text = "Открытых комнат: ${openRoomsLabel(server.openRooms.size)}",
@@ -1204,6 +1305,7 @@ fun InstallTab(
                         item {
                             CollapsibleSectionCard(
                                 title = "Комнаты",
+                                subtitle = "Открытых комнат: ${openRoomsLabel(server.openRooms.size)}",
                                 expanded = roomsExpanded,
                                 onToggle = { roomsExpanded = !roomsExpanded }
                             ) {
@@ -1213,30 +1315,21 @@ fun InstallTab(
                                     verticalAlignment = Alignment.CenterVertically
                                 ) {
                                     Text(
-                                        text = buildAnnotatedString {
-                                            append("Открытых комнат: ")
-                                            withStyle(
-                                                SpanStyle(
-                                                    color = AppAccent,
-                                                    fontWeight = FontWeight.SemiBold
-                                                )
-                                            ) {
-                                                append(openRoomsLabel(server.openRooms.size))
-                                            }
-                                        },
-                                        color = appTextSecondaryColor(),
-                                        fontSize = 14.sp
+                                        text = "Открытые комнаты",
+                                        color = appTextPrimaryColor(),
+                                        fontSize = 15.sp,
+                                        lineHeight = 20.sp,
+                                        fontWeight = FontWeight.SemiBold
                                     )
 
                                     Row(
-                                        horizontalArrangement = Arrangement.spacedBy(10.dp),
+                                        horizontalArrangement = Arrangement.spacedBy(8.dp),
                                         verticalAlignment = Alignment.CenterVertically
                                     ) {
                                         TopIconAction(
                                             icon = Icons.Filled.Refresh,
                                             onClick = { refreshOpenRooms(server) },
                                             enabled = !roomActionLoading,
-                                            accent = AppAccent,
                                             contentDescription = "Обновить список комнат"
                                         )
                                         TopIconAction(
@@ -1246,7 +1339,6 @@ fun InstallTab(
                                                 showAddRoomDialog = true
                                             },
                                             enabled = !roomActionLoading,
-                                            accent = AppAccent,
                                             contentDescription = "Добавить комнату"
                                         )
                                     }
@@ -1257,8 +1349,8 @@ fun InstallTab(
                                         modifier = Modifier
                                             .fillMaxWidth()
                                             .clip(InnerCardShape)
-                                            .background(appSurfaceElevatedColor())
-                                            .border(1.dp, appBorderColor(), InnerCardShape)
+                                            .background(appSurfaceColor().copy(alpha = 0.72f))
+                                            .border(1.dp, appGrayControlBorderColor(), InnerCardShape)
                                             .padding(12.dp)
                                     ) {
                                         Text(
@@ -1271,7 +1363,12 @@ fun InstallTab(
                                     server.openRooms.forEach { openRoom ->
                                         RoomItemCard(
                                             room = openRoom,
+                                            expanded = expandedRoomName == openRoom.name,
                                             loading = roomActionLoading && roomActionName == openRoom.name,
+                                            onToggle = {
+                                                expandedRoomName =
+                                                    if (expandedRoomName == openRoom.name) null else openRoom.name
+                                            },
                                             onCopyGuest = {
                                                 val link = guestLink(server, openRoom)
                                                 if (link == null) missingPinError() else copyToClipboard("guest_https_room_link", link)
@@ -1304,6 +1401,9 @@ fun InstallTab(
                                                     }
                                                 }
                                             },
+                                            onRotateModerator = {
+                                                pendingModeratorLinkRotationRoom = openRoom.name
+                                            },
                                             onClose = {
                                                 roomActionName = openRoom.name
                                                 applyRoomAction(server, open = false)
@@ -1334,7 +1434,7 @@ fun InstallTab(
                                         .heightIn(min = 220.dp, max = 320.dp)
                                         .clip(InnerCardShape)
                                         .background(appSurfaceElevatedColor())
-                                        .border(1.dp, appBorderColor(), InnerCardShape)
+                                        .border(1.dp, Color.Transparent, InnerCardShape)
                                         .padding(12.dp),
                                     verticalArrangement = Arrangement.spacedBy(6.dp)
                                 ) {
@@ -1387,14 +1487,14 @@ internal fun ServerListCard(
 ) {
     Surface(
         modifier = Modifier.fillMaxWidth(),
-        color = appSurfaceColor(),
+        color = appSurfaceElevatedColor(),
         shape = CardShape,
         tonalElevation = 0.dp,
         shadowElevation = 0.dp
     ) {
         Box(
             modifier = Modifier
-                .border(1.dp, appBorderColor(), CardShape)
+                .border(1.dp, appGrayControlBorderColor(), CardShape)
                 .clickable(onClick = onClick)
                 .padding(14.dp)
         ) {
@@ -1434,7 +1534,7 @@ internal fun ServerListCard(
                     IconButton(onClick = onDelete) {
                         Icon(
                             imageVector = Icons.Filled.Delete,
-                            contentDescription = "Удалить сервер",
+                            contentDescription = tr("Удалить сервер"),
                             tint = AppError
                         )
                     }
@@ -1459,34 +1559,179 @@ internal fun ServerListCard(
 }
 
 @Composable
+internal fun RoomsSectionCard(
+    roomNames: List<String>,
+    expanded: Boolean,
+    onToggle: () -> Unit,
+    onRefresh: () -> Unit,
+    onAdd: () -> Unit,
+    actionsEnabled: Boolean,
+    content: @Composable ColumnScope.() -> Unit
+) {
+    Surface(
+        modifier = Modifier
+            .fillMaxWidth()
+            .animateContentSize(),
+        color = appRoomSurfaceColor(),
+        shape = CardShape,
+        tonalElevation = 0.dp,
+        shadowElevation = 0.dp
+    ) {
+        Column(
+            modifier = Modifier
+                .border(1.dp, Color.Transparent, CardShape)
+                .padding(14.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp)
+        ) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(InnerCardShape)
+                    .clickable(onClick = onToggle)
+                    .padding(vertical = 2.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                Box(
+                    modifier = Modifier
+                        .size(40.dp)
+                        .clip(AppButtonShape)
+                        .background(AppAccent.copy(alpha = 0.14f)),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Icon(
+                        imageVector = Icons.Filled.GridView,
+                        contentDescription = null,
+                        tint = AppAccent,
+                        modifier = Modifier.size(20.dp)
+                    )
+                }
+
+                Column(
+                    modifier = Modifier.weight(1f),
+                    verticalArrangement = Arrangement.spacedBy(2.dp)
+                ) {
+                    Text(
+                        text = "Комнаты",
+                        color = appTextPrimaryColor(),
+                        fontSize = 17.sp,
+                        lineHeight = 22.sp,
+                        fontWeight = FontWeight.SemiBold
+                    )
+                    Text(
+                        text = "Открытых комнат: ${openRoomsLabel(roomNames.size)}",
+                        color = appTextSecondaryColor(),
+                        fontSize = 12.sp,
+                        lineHeight = 17.sp
+                    )
+                }
+
+                Icon(
+                    imageVector = if (expanded) Icons.Filled.KeyboardArrowUp else Icons.Filled.KeyboardArrowDown,
+                    contentDescription = tr(if (expanded) "Свернуть комнаты" else "Развернуть комнаты"),
+                    tint = appTextSecondaryColor(),
+                    modifier = Modifier.size(24.dp)
+                )
+            }
+
+            AnimatedVisibility(visible = !expanded) {
+                Text(
+                    text = when {
+                        roomNames.isEmpty() -> "Открытых комнат нет."
+                        roomNames.size <= 2 -> roomNames.joinToString(" · ")
+                        else -> roomNames.take(2).joinToString(" · ") + " · +${roomNames.size - 2}"
+                    },
+                    color = appTextSecondaryColor(),
+                    fontSize = 13.sp,
+                    lineHeight = 18.sp,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+            }
+
+            AnimatedVisibility(visible = expanded) {
+                Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(10.dp)
+                    ) {
+                        ActionButton(
+                            label = "Обновить",
+                            onClick = onRefresh,
+                            modifier = Modifier.weight(1f),
+                            kind = ActionButtonKind.SECONDARY,
+                            enabled = actionsEnabled,
+                            icon = Icons.Filled.Refresh
+                        )
+                        ActionButton(
+                            label = "Добавить комнату",
+                            onClick = onAdd,
+                            modifier = Modifier.weight(1f),
+                            kind = ActionButtonKind.SECONDARY,
+                            enabled = actionsEnabled,
+                            icon = Icons.Filled.Add
+                        )
+                    }
+
+                    content()
+                }
+            }
+        }
+    }
+}
+
+@Composable
 internal fun RoomItemCard(
     room: OpenRoomInfo,
+    expanded: Boolean,
     loading: Boolean,
+    onToggle: () -> Unit,
     onCopyGuest: () -> Unit,
     onQrGuest: () -> Unit,
     onCopyModerator: () -> Unit,
     onQrModerator: () -> Unit,
+    onRotateModerator: () -> Unit,
     onClose: () -> Unit
 ) {
     Surface(
         modifier = Modifier.fillMaxWidth(),
-        color = appSurfaceElevatedColor(),
+        color = appRoomSurfaceColor(),
         shape = InnerCardShape,
         tonalElevation = 0.dp,
         shadowElevation = 0.dp
     ) {
         Column(
             modifier = Modifier
-                .border(1.dp, appBorderColor(), InnerCardShape)
+                .border(1.dp, appGrayControlBorderColor(), InnerCardShape)
+                .animateContentSize()
                 .padding(12.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp)
         ) {
             Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(InnerCardShape)
+                    .clickable(onClick = onToggle)
+                    .padding(vertical = 2.dp),
+                horizontalArrangement = Arrangement.spacedBy(10.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                Box(
+                    modifier = Modifier
+                        .size(38.dp)
+                        .clip(AppButtonShape)
+                        .background(AppAccent.copy(alpha = 0.13f)),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Icon(
+                        imageVector = Icons.Filled.MeetingRoom,
+                        contentDescription = null,
+                        tint = AppAccent,
+                        modifier = Modifier.size(20.dp)
+                    )
+                }
+
+                Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
                     Text(
                         text = room.name,
                         color = appTextPrimaryColor(),
@@ -1494,39 +1739,59 @@ internal fun RoomItemCard(
                         fontSize = 15.sp
                     )
                     Text(
-                        text = if (room.moderatorKey.isBlank()) "moderator_key не получен" else "",
+                        text = if (room.moderatorKey.isBlank()) "Ссылка модератора недоступна" else "Ссылки готовы",
                         color = if (room.moderatorKey.isBlank()) AppError else appTextSecondaryColor(),
                         fontSize = 12.sp
                     )
                 }
 
-                ActionButton(
-                    label = "Закрыть",
-                    onClick = onClose,
-                    modifier = Modifier.width(106.dp),
-                    kind = ActionButtonKind.GHOST,
-                    enabled = !loading,
-                    loading = loading
+                Icon(
+                    imageVector = if (expanded) Icons.Filled.KeyboardArrowUp else Icons.Filled.KeyboardArrowDown,
+                    contentDescription = tr(if (expanded) "Свернуть комнату" else "Развернуть комнату"),
+                    tint = appTextSecondaryColor(),
+                    modifier = Modifier.size(22.dp)
                 )
             }
 
-            RoomLinkActionsRow(
-                title = "Гость",
-                subtitle = "",
-                badgeColor = appTextSecondaryColor(),
-                onCopy = onCopyGuest,
-                onQr = onQrGuest,
-                enabled = !loading
-            )
+            AnimatedVisibility(visible = expanded) {
+                Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                    RoomLinkActionsRow(
+                        title = "Гость",
+                        subtitle = "Ссылка для подключения без прав модератора",
+                        badgeColor = appTextSecondaryColor(),
+                        onCopy = onCopyGuest,
+                        onQr = onQrGuest,
+                        enabled = !loading
+                    )
 
-            RoomLinkActionsRow(
-                title = "Модератор",
-                subtitle = "",
-                badgeColor = AppAccent,
-                onCopy = onCopyModerator,
-                onQr = onQrModerator,
-                enabled = !loading
-            )
+                    RoomLinkActionsRow(
+                        title = "Модератор",
+                        subtitle = "Ссылка с правами управления комнатой",
+                        badgeColor = AppAccent,
+                        onCopy = onCopyModerator,
+                        onQr = onQrModerator,
+                        enabled = !loading
+                    )
+
+                    ActionButton(
+                        label = "Обновить ссылку модератора",
+                        onClick = onRotateModerator,
+                        modifier = Modifier.fillMaxWidth(),
+                        kind = ActionButtonKind.SECONDARY,
+                        enabled = !loading
+                    )
+
+                    ActionButton(
+                        label = "Закрыть комнату",
+                        onClick = onClose,
+                        modifier = Modifier.fillMaxWidth(),
+                        kind = ActionButtonKind.SECONDARY,
+                        textColorOverride = AppError,
+                        enabled = !loading,
+                        loading = loading
+                    )
+                }
+            }
         }
     }
 }
@@ -1538,43 +1803,156 @@ internal fun RoomLinkActionsRow(
     badgeColor: Color,
     onCopy: () -> Unit,
     onQr: () -> Unit,
-    enabled: Boolean
+    enabled: Boolean,
+    comfortable: Boolean = false
 ) {
-    Column(
+    if (comfortable) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clip(CardShape)
+                .background(appRoomSurfaceColor())
+                .padding(14.dp),
+            verticalArrangement = Arrangement.spacedBy(13.dp)
+        ) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(10.dp),
+                verticalAlignment = Alignment.Top
+            ) {
+                Box(
+                    modifier = Modifier
+                        .padding(top = 6.dp)
+                        .size(8.dp)
+                        .clip(RoundedCornerShape(50))
+                        .background(badgeColor)
+                )
+
+                Column(
+                    modifier = Modifier.weight(1f),
+                    verticalArrangement = Arrangement.spacedBy(4.dp)
+                ) {
+                    Text(
+                        text = title,
+                        color = appTextPrimaryColor(),
+                        fontWeight = FontWeight.SemiBold,
+                        fontSize = 15.sp,
+                        lineHeight = 20.sp
+                    )
+                    if (subtitle.isNotBlank()) {
+                        Text(
+                            text = subtitle,
+                            color = appTextSecondaryColor(),
+                            fontSize = 12.sp,
+                            lineHeight = 17.sp
+                        )
+                    }
+                }
+            }
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
+                ActionButton(
+                    label = "Копировать",
+                    onClick = onCopy,
+                    modifier = Modifier.weight(1f),
+                    kind = ActionButtonKind.SECONDARY,
+                    icon = Icons.Filled.ContentCopy,
+                    enabled = enabled
+                )
+                ActionButton(
+                    label = "QR-код",
+                    onClick = onQr,
+                    modifier = Modifier.weight(1f),
+                    kind = ActionButtonKind.SECONDARY,
+                    icon = Icons.Filled.QrCode2,
+                    enabled = enabled
+                )
+            }
+        }
+        return
+    }
+
+    Row(
         modifier = Modifier
             .fillMaxWidth()
-            .clip(RoundedCornerShape(12.dp))
-            .background(appSurfaceColor().copy(alpha = 0.72f))
-            .border(1.dp, appBorderColor(0.75f), RoundedCornerShape(12.dp))
-            .padding(10.dp),
-        verticalArrangement = Arrangement.spacedBy(8.dp)
+            .clip(RoundedCornerShape(10.dp))
+            .background(appSurfaceElevatedColor().copy(alpha = 0.72f))
+            .padding(horizontal = 10.dp, vertical = 7.dp),
+        horizontalArrangement = Arrangement.spacedBy(10.dp),
+        verticalAlignment = Alignment.CenterVertically
     ) {
-        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            InfoBadge(label = title, color = badgeColor)
-            Text(subtitle, color = appTextSecondaryColor(), fontSize = 12.sp)
-        }
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.spacedBy(10.dp)
-        ) {
-            ActionButton(
-                label = "Ссылка",
-                onClick = onCopy,
-                modifier = Modifier.weight(1f),
-                kind = ActionButtonKind.SECONDARY,
-                icon = Icons.Filled.ContentCopy,
-                enabled = enabled
-            )
+        Box(
+            modifier = Modifier
+                .size(7.dp)
+                .clip(RoundedCornerShape(50))
+                .background(badgeColor)
+        )
 
-            ActionButton(
-                label = "QR",
-                onClick = onQr,
-                modifier = Modifier.weight(0.8f),
-                kind = ActionButtonKind.SECONDARY,
-                icon = Icons.Filled.QrCode2,
-                enabled = enabled
+        Column(
+            modifier = Modifier.weight(1f),
+            verticalArrangement = Arrangement.spacedBy(1.dp)
+        ) {
+            Text(
+                text = title,
+                color = appTextPrimaryColor(),
+                fontWeight = FontWeight.Medium,
+                fontSize = 14.sp,
+                lineHeight = 18.sp,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
             )
+            if (subtitle.isNotBlank()) {
+                Text(
+                    text = subtitle,
+                    color = appTextSecondaryColor(),
+                    fontSize = 11.sp,
+                    lineHeight = 14.sp,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+            }
         }
+
+        RoomLinkIconButton(
+            icon = Icons.Filled.ContentCopy,
+            contentDescription = "Копировать",
+            onClick = onCopy,
+            enabled = enabled
+        )
+        RoomLinkIconButton(
+            icon = Icons.Filled.QrCode2,
+            contentDescription = "QR-код",
+            onClick = onQr,
+            enabled = enabled
+        )
+    }
+}
+
+@Composable
+private fun RoomLinkIconButton(
+    icon: ImageVector,
+    contentDescription: String,
+    onClick: () -> Unit,
+    enabled: Boolean
+) {
+    IconButton(
+        onClick = onClick,
+        enabled = enabled,
+        modifier = Modifier
+            .size(38.dp)
+            .clip(AppButtonShape)
+            .background(appSurfaceColor())
+            .border(1.dp, appGrayControlBorderColor(), AppButtonShape)
+    ) {
+        Icon(
+            imageVector = icon,
+            contentDescription = tr(contentDescription),
+            tint = if (enabled) appTextPrimaryColor() else appTextMutedColor(),
+            modifier = Modifier.size(18.dp)
+        )
     }
 }
 
@@ -1589,7 +1967,7 @@ internal fun EditableFieldRow(
             .fillMaxWidth()
             .clip(InnerCardShape)
             .background(appSurfaceElevatedColor())
-            .border(1.dp, appBorderColor(), InnerCardShape)
+            .border(1.dp, Color.Transparent, InnerCardShape)
             .padding(horizontal = 12.dp, vertical = 10.dp),
         horizontalArrangement = Arrangement.SpaceBetween,
         verticalAlignment = Alignment.CenterVertically
@@ -1606,7 +1984,7 @@ internal fun EditableFieldRow(
             )
         }
         IconButton(onClick = onEdit) {
-            Icon(imageVector = Icons.Filled.Edit, contentDescription = "Редактировать", tint = AppAccent)
+            Icon(imageVector = Icons.Filled.Edit, contentDescription = tr("Редактировать"), tint = AppAccent)
         }
     }
 }

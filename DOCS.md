@@ -94,15 +94,15 @@ Key functions:
 
 - `loadTelemetryPrivacyPrefs()` and `persistTelemetryPrivacyPrefs()` read/write privacy settings.
 - `setExternalTelemetryEnabled()` toggles external telemetry.
-- `startNewRelicTelemetry()` initializes New Relic when configured and allowed.
-- `shutdownNewRelicTelemetry()` stops telemetry on teardown.
+- `startTelemetry()` sends the first-party installation lifecycle signal when configured.
 - `trackRtcEvent()` records high-level RTC events.
 - `shouldSendImportantTelemetry()` filters noisy events.
 - `sanitizeTelemetryAttrs()` removes sensitive values before telemetry export.
 - `newTelemetrySessionId()` creates an anonymous per-session ID.
 - `markConferenceConnected()` and `finishConferenceTelemetry()` track call lifecycle duration.
 - `noteAudioTelemetryError()`, `noteCameraTelemetryError()`, `noteIceBadStateTelemetry()`, and `notePcBadStateTelemetry()` record important error classes.
-- `recordRtcMetric()` and `recordInstallerMetric()` record numeric metrics.
+
+`TelemetryClient.kt` owns the first-party HTTP transport. It creates a random installation ID and, without diagnostic consent, sends `app.install` once, `app.installed` at most daily, every process-level `app.launch`, and diagnostic-consent changes. It sends whitelisted conference diagnostics only after consent. Configure it with `TELEMETRY_ENDPOINT` and `TELEMETRY_TOKEN` Gradle properties.
 
 ## `install/RemoteInstaller.kt`
 

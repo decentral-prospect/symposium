@@ -37,6 +37,7 @@ import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Fullscreen
 import androidx.compose.material.icons.filled.FullscreenExit
 import androidx.compose.material.icons.filled.GridView
+import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.MicOff
 import androidx.compose.material.icons.filled.PushPin
@@ -47,7 +48,6 @@ import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.Surface
-import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -65,6 +65,8 @@ import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
@@ -117,15 +119,48 @@ internal fun ParticipantsTopBar(
 
             Spacer(Modifier.width(10.dp))
 
+            SecureCallBadge()
+
+            Spacer(Modifier.width(8.dp))
+
             RoundIconButton(
                 icon = if (mode == CallViewMode.FOCUS) Icons.Filled.GridView else Icons.Filled.CenterFocusStrong,
-                contentDescription = "Toggle view",
+                contentDescription = tr("Toggle view"),
                 onClick = onToggleMode,
                 background = callControlBackgroundColor(),
-                tint = callIconColor(),
-                border = AppAccent.copy(alpha = 0.95f)
+                tint = callIconColor()
             )
         }
+    }
+}
+
+@Composable
+private fun SecureCallBadge() {
+    Row(
+        modifier = Modifier
+            .height(36.dp)
+            .clip(RoundedCornerShape(999.dp))
+            .background(AppSuccess.copy(alpha = 0.14f))
+            .semantics(mergeDescendants = true) {
+                contentDescription = tr("Сквозное шифрование включено")
+            }
+            .padding(horizontal = 10.dp),
+        horizontalArrangement = Arrangement.spacedBy(5.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Icon(
+            imageVector = Icons.Filled.Lock,
+            contentDescription = null,
+            tint = AppSuccess,
+            modifier = Modifier.size(15.dp)
+        )
+        Text(
+            text = "E2EE",
+            color = AppSuccess,
+            fontSize = 11.sp,
+            lineHeight = 14.sp,
+            fontWeight = FontWeight.Bold
+        )
     }
 }
 
@@ -185,7 +220,7 @@ internal fun ModeratorFloatingButton(
     ) {
         Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             Icon(Icons.Filled.Settings, contentDescription = null, tint = contentColor, modifier = Modifier.size(18.dp))
-            Text("MOD", color = contentColor, fontWeight = FontWeight.Bold, fontSize = 13.sp)
+            Text("МОД", color = contentColor, fontWeight = FontWeight.Bold, fontSize = 13.sp)
             if (pendingCount > 0) {
                 Box(
                     modifier = Modifier
@@ -291,7 +326,7 @@ internal fun ModeratorPanelOverlay(
                     IconButton(onClick = onClose) {
                         Icon(
                             imageVector = Icons.Filled.Close,
-                            contentDescription = "Закрыть",
+                            contentDescription = tr("Закрыть"),
                             tint = callTextSecondaryColor()
                         )
                     }
@@ -878,7 +913,7 @@ internal fun SelfVideoPip(
         ) {
             Icon(
                 imageVector = Icons.Filled.Cameraswitch,
-                contentDescription = "Перевернуть камеру",
+                contentDescription = tr("Перевернуть камеру"),
                 tint = Color.White,
                 modifier = Modifier.size(21.dp)
             )
@@ -897,7 +932,7 @@ internal fun SelfVideoPip(
         ) {
             Icon(
                 imageVector = if (expanded) Icons.Filled.FullscreenExit else Icons.Filled.Fullscreen,
-                contentDescription = if (expanded) "Уменьшить миниатюру" else "Увеличить миниатюру",
+                contentDescription = tr(if (expanded) "Уменьшить миниатюру" else "Увеличить миниатюру"),
                 tint = Color.White,
                 modifier = Modifier.size(21.dp)
             )
@@ -1408,7 +1443,7 @@ internal fun PeerVideoTile(
                 ) {
                     Icon(
                         imageVector = Icons.Filled.Cameraswitch,
-                        contentDescription = "Перевернуть камеру",
+                        contentDescription = tr("Перевернуть камеру"),
                         tint = Color.White,
                         modifier = Modifier.size(if (bigName) 23.dp else 19.dp)
                     )
@@ -1418,7 +1453,7 @@ internal fun PeerVideoTile(
             if (showStatusOverlay && micOff) {
                 Icon(
                     imageVector = Icons.Filled.MicOff,
-                    contentDescription = "Mic off",
+                    contentDescription = tr("Mic off"),
                     tint = Color.White.copy(alpha = 0.9f),
                     modifier = Modifier
                         .size(if (bigName) 26.dp else 20.dp)
@@ -1430,7 +1465,7 @@ internal fun PeerVideoTile(
             if (showStatusOverlay && showPin) {
                 Icon(
                     imageVector = Icons.Filled.PushPin,
-                    contentDescription = "Pinned",
+                    contentDescription = tr("Pinned"),
                     tint = AppAccent.copy(alpha = 0.95f),
                     modifier = Modifier
                         .size(18.dp)
@@ -1441,7 +1476,7 @@ internal fun PeerVideoTile(
             if (showStatusOverlay) {
                 Icon(
                     imageVector = if (hasVideo) Icons.Filled.Videocam else Icons.Filled.VideocamOff,
-                    contentDescription = if (hasVideo) "Video on" else "Video off",
+                    contentDescription = tr(if (hasVideo) "Video on" else "Video off"),
                     tint = if (hasVideo) AppAccent else Color.White.copy(alpha = 0.8f),
                     modifier = Modifier
                         .size(if (bigName) 20.dp else 16.dp)

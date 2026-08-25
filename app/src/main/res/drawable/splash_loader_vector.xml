@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <group
+        android:name="spinner"
+        android:pivotX="54"
+        android:pivotY="54">
+        <path
+            android:pathData="M54,18 A36,36 0,0 1,79.46,28.54"
+            android:strokeWidth="7"
+            android:strokeColor="#FFFFE0CC"
+            android:strokeLineCap="round" />
+        <path
+            android:pathData="M84.8,35.36 A36,36 0,0 1,88.78,63.32"
+            android:strokeWidth="7"
+            android:strokeColor="#FFFB8F46"
+            android:strokeLineCap="round" />
+        <path
+            android:pathData="M85.18,71.72 A36,36 0,0 1,60.25,89.45"
+            android:strokeWidth="7"
+            android:strokeColor="#FFF27535"
+            android:strokeLineCap="round" />
+        <path
+            android:pathData="M51,89.88 A36,36 0,0 1,24.27,74.29"
+            android:strokeWidth="7"
+            android:strokeColor="#FFDA551C"
+            android:strokeLineCap="round" />
+        <path
+            android:pathData="M19.85,66 A36,36 0,0 1,25.98,31.98"
+            android:strokeWidth="7"
+            android:strokeColor="#FF843A16"
+            android:strokeLineCap="round" />
+    </group>
+</vector>

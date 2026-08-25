@@ -15,6 +15,7 @@ internal fun CallRuntime.createRtcConfiguration(
         rtcpMuxPolicy = PeerConnection.RtcpMuxPolicy.REQUIRE
         continualGatheringPolicy = PeerConnection.ContinualGatheringPolicy.GATHER_ONCE
         iceCandidatePoolSize = 0
+        cryptoOptions = requiredFrameCryptoOptions()
     }
 }
 
@@ -37,10 +38,11 @@ internal fun CallRuntime.restartSubscribePeerConnection(reason: String) {
     retireSubscribeProtocolGeneration("restart-subscribe:$reason")
     queuedRemoteIceSubscribe.clear()
 
+    disposeE2eeReceiverCryptors()
     runCatching {
         subscribePeerConnection?.close()
     }.onFailure {
-        Log.w(TAG, "close old subscribe PC failed: ${it.message}")
+        diagnosticWarning(TAG, "close old subscribe PC failed: ${it.message}")
     }
 
     subscribePeerConnection = null
@@ -56,7 +58,7 @@ internal fun CallRuntime.restartSubscribePeerConnection(reason: String) {
     val newPc = runCatching {
         factory.createPeerConnection(config, makeSubscribeObserver(subscribeGeneration))
     }.getOrElse {
-        Log.e(TAG, "Failed to recreate subscribe PC: ${it.message}")
+        diagnosticError(TAG, "Failed to recreate subscribe PC: ${it.message}")
         diagLog("Subscribe PC recreate failed", it.message)
         return
     }
