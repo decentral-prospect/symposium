@@ -124,7 +124,6 @@ internal fun ActionButton(
         )
     }
     val textColor = textColorOverride ?: baseTextColor
-    val borderColor = borderColorOverride ?: baseBorderColor
     val fillModifier = if (kind == ActionButtonKind.PRIMARY) {
         Modifier.background(
             brush = appPrimaryGradient(if (enabled) 1f else 0.35f),
@@ -139,7 +138,6 @@ internal fun ActionButton(
             .heightIn(min = 52.dp)
             .clip(AppButtonShape)
             .then(fillModifier)
-            .border(1.dp, if (enabled) borderColor else borderColor.copy(alpha = 0.35f), AppButtonShape)
             .semantics(mergeDescendants = true) {
                 role = Role.Button
                 if (loading) stateDescription = tr("Загрузка")

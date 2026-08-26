@@ -1,5 +1,6 @@
 package com.decentralprospect.symposium
 
+import android.media.AudioManager
 import android.media.MediaRecorder
 import android.util.Log
 import org.webrtc.DefaultVideoDecoderFactory
@@ -181,13 +182,44 @@ internal fun CallRuntime.initWebRtc() {
     debugLog(TAG, "WebRTC initialized")
 }
 
+internal fun CallRuntime.preferredAdmSampleRate(): Int {
+    val am = callAudioManager()
+    val reported = runCatching {
+        am.getProperty(AudioManager.PROPERTY_OUTPUT_SAMPLE_RATE)?.toIntOrNull()
+    }.getOrNull()
+
+    // WebRTC historically forces 8 kHz on Android Emulator. Modern AVDs use
+    // a 48 kHz AudioFlinger output mixer, so that legacy heuristic can produce
+    // a narrow-band playout path that behaves incorrectly until capture starts.
+    val selected = reported?.takeIf { it in 16_000..192_000 } ?: 48_000
+    diagLog("ADM sample rate", "reported=${reported ?: "unknown"} selected=$selected")
+    return selected
+}
+
 internal fun CallRuntime.recreateAdm(useHwAec: Boolean, useHwNs: Boolean) {
     runCatching { audioDeviceModule?.release() }
 
+    val admSampleRate = preferredAdmSampleRate()
+
     audioDeviceModule = JavaAudioDeviceModule.builder(appContext)
+        .setSampleRate(admSampleRate)
         .setUseHardwareAcousticEchoCanceler(useHwAec)
         .setUseHardwareNoiseSuppressor(useHwNs)
         .setAudioSource(MediaRecorder.AudioSource.VOICE_COMMUNICATION)
+        .setAudioTrackStateCallback(object : JavaAudioDeviceModule.AudioTrackStateCallback {
+            override fun onWebRtcAudioTrackStart() {
+                postUi {
+                    diagLog("WebRTC audio playout started")
+                    configureCallAudioMode()
+                    applyPreferredAudioRoute("adm-playout-start")
+                    schedulePreferredAudioRouteReapply("adm-playout-start")
+                }
+            }
+
+            override fun onWebRtcAudioTrackStop() {
+                diagLog("WebRTC audio playout stopped")
+            }
+        })
         .setAudioRecordErrorCallback(object : JavaAudioDeviceModule.AudioRecordErrorCallback {
             override fun onWebRtcAudioRecordInitError(errorMessage: String?) {
                 diagnosticError(TAG, "ADM Record init: $errorMessage")

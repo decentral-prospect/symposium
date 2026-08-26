@@ -141,14 +141,18 @@ internal fun CallRuntime.startAudioRoutingMonitor() {
             override fun onAudioDevicesAdded(addedDevices: Array<out AudioDeviceInfo>) {
                 postUi {
                     diagLog("Audio devices added", describeAudioDevices())
+                    preferredAudioRoute = defaultCallAudioRoute(am)
                     applyPreferredAudioRoute("audio-devices-added")
+                    schedulePreferredAudioRouteReapply("audio-devices-added")
                 }
             }
 
             override fun onAudioDevicesRemoved(removedDevices: Array<out AudioDeviceInfo>) {
                 postUi {
                     diagLog("Audio devices removed", describeAudioDevices())
+                    preferredAudioRoute = defaultCallAudioRoute(am)
                     applyPreferredAudioRoute("audio-devices-removed")
+                    schedulePreferredAudioRouteReapply("audio-devices-removed")
                 }
             }
         }
@@ -188,6 +192,7 @@ internal fun CallRuntime.startAudioRoutingMonitor() {
                     AudioManager.SCO_AUDIO_STATE_ERROR -> {
                         bluetoothScoStarted = false
                         if (currentAudioRoute == AudioRoute.BLUETOOTH || preferredAudioRoute == AudioRoute.BLUETOOTH) {
+                            preferredAudioRoute = defaultCallAudioRoute(callAudioManager())
                             applyPreferredAudioRoute("bt-sco-$stateText")
                         } else {
                             updateCameraDebug("bt-sco-$stateText")
@@ -237,14 +242,15 @@ internal fun CallRuntime.applyPreferredAudioRoute(reason: String) {
     }
 
     val am = callAudioManager()
-    val route = when {
-        preferredAudioRoute == AudioRoute.SPEAKER -> AudioRoute.SPEAKER
-        preferredAudioRoute == AudioRoute.EARPIECE -> AudioRoute.EARPIECE
-        preferredAudioRoute == AudioRoute.BLUETOOTH && (hasBluetoothCallDevice(am) || hasBluetoothOutputDevice(am)) -> AudioRoute.BLUETOOTH
-        preferredAudioRoute == AudioRoute.WIRED_HEADSET && hasWiredHeadset(am) -> AudioRoute.WIRED_HEADSET
-        hasBluetoothCallDevice(am) -> AudioRoute.BLUETOOTH
-        hasWiredHeadset(am) -> AudioRoute.WIRED_HEADSET
-        else -> AudioRoute.SPEAKER
+    val route = when (preferredAudioRoute) {
+        AudioRoute.BLUETOOTH -> {
+            if (hasBluetoothCallDevice(am)) AudioRoute.BLUETOOTH else defaultCallAudioRoute(am)
+        }
+        AudioRoute.WIRED_HEADSET -> {
+            if (hasWiredHeadset(am)) AudioRoute.WIRED_HEADSET else defaultCallAudioRoute(am)
+        }
+        AudioRoute.SPEAKER -> AudioRoute.SPEAKER
+        AudioRoute.EARPIECE -> AudioRoute.EARPIECE
     }
     setAudioRoute(route, reason)
 }
@@ -448,8 +454,8 @@ internal fun CallRuntime.resetAudioRoutingForIdle() {
 
     runCatching { am.mode = AudioManager.MODE_NORMAL }
     abandonCallAudioFocus(am)
-    currentAudioRoute = AudioRoute.EARPIECE
-    preferredAudioRoute = AudioRoute.EARPIECE
+    currentAudioRoute = AudioRoute.SPEAKER
+    preferredAudioRoute = AudioRoute.SPEAKER
     speakerphoneOn = false
     bluetoothScoStarted = false
     setSpeakerState(false)
