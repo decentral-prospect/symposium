@@ -215,7 +215,7 @@ tasks.named("preBuild").configure {
 
 dependencies {
     implementation("androidx.appcompat:appcompat:1.6.1")
-    implementation("com.google.android.material:material:1.10.0")
+    implementation("com.google.android.material:material:1.14.0")
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
     implementation("io.github.webrtc-sdk:android:144.7559.09")
     implementation("com.hierynomus:sshj:0.40.0")
