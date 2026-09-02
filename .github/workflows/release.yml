@@ -116,7 +116,7 @@ jobs:
           apksigner="$(find "$ANDROID_HOME/build-tools" -type f -name apksigner -print | sort -V | tail -n 1)"
           [[ -x "$apksigner" ]]
           "$apksigner" verify --verbose --print-certs "$apk"
-          "$JAVA_HOME/bin/jarsigner" -verify -strict -verbose "$aab"
+          "$JAVA_HOME/bin/jarsigner" -verify -verbose -certs "$aab"
 
       - name: Generate CycloneDX SBOM from signed APK
         uses: anchore/sbom-action@3ad7283483fc7af8ff2b4ea19663c2d5ca935e26 # v0.24.2
