@@ -19,7 +19,6 @@ jobs:
     timeout-minutes: 60
     env:
       CI: "true"
-      SYMPOSIUM_VERIFY_RELAY_ATTESTATION: "true"
       SYMPOSIUM_ANDROID_E2E_REQUIRE_OUTBOUND_AUDIO: "false"
       TELEMETRY_ENDPOINT: ""
       TELEMETRY_TOKEN: ""
@@ -67,9 +66,7 @@ jobs:
       - name: Test relay lock tooling
         run: scripts/test-relay-tools.sh
 
-      - name: Fetch and attest locked relay
-        env:
-          GH_TOKEN: ${{ github.token }}
+      - name: Fetch locked relay
         run: scripts/fetch-relay.sh
 
       - name: Run Android emulator media E2E

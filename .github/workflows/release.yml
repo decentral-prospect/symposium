@@ -20,7 +20,6 @@ jobs:
       attestations: write
     env:
       CI: "true"
-      SYMPOSIUM_VERIFY_RELAY_ATTESTATION: "true"
 
     steps:
       - name: Check out tagged source
@@ -62,10 +61,13 @@ jobs:
       - name: Test relay lock tooling
         run: scripts/test-relay-tools.sh
 
-      - name: Fetch and attest locked relay
+      - name: Fetch locked relay
+        run: scripts/fetch-relay.sh
+
+      - name: Verify locked relay provenance
         env:
           GH_TOKEN: ${{ github.token }}
-        run: scripts/fetch-relay.sh
+        run: scripts/verify-relay-provenance.sh
 
       - name: Reconstruct release keystore
         env:

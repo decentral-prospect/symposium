@@ -28,7 +28,8 @@ release secrets.
 
    ```bash
    scripts/update-relay-lock.sh 0.3.4
-   SYMPOSIUM_VERIFY_RELAY_ATTESTATION=true scripts/fetch-relay.sh
+   scripts/fetch-relay.sh
+   scripts/verify-relay-provenance.sh
    ```
 
 3. Update `VERSION_NAME` and monotonically increase `VERSION_CODE` in
@@ -57,7 +58,9 @@ It then performs this sequence:
 ```text
 immutable relay release
         ↓
-locked relay checksum + SLSA/CycloneDX verification
+locked relay checksum
+        ↓
+relay release metadata + SLSA/CycloneDX verification
         ↓
 strict Gradle dependency verification
         ↓

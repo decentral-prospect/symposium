@@ -21,7 +21,11 @@ jobs:
     timeout-minutes: 45
     env:
       CI: "true"
-      SYMPOSIUM_VERIFY_RELAY_ATTESTATION: "true"
+      ANDROID_KEYSTORE_PATH: ""
+      ANDROID_KEYSTORE_PASSWORD: ""
+      ANDROID_KEY_ALIAS: ""
+      ANDROID_KEY_PASSWORD: ""
+      SYMPOSIUM_REQUIRE_RELEASE_SIGNING: "false"
       TELEMETRY_ENDPOINT: ""
       TELEMETRY_TOKEN: ""
 
@@ -29,6 +33,7 @@ jobs:
       - name: Check out source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          fetch-depth: 0
           persist-credentials: false
 
       - name: Validate Gradle wrapper
@@ -46,10 +51,47 @@ jobs:
       - name: Test relay lock tooling
         run: scripts/test-relay-tools.sh
 
-      - name: Fetch and attest locked relay
+      - name: Fetch locked relay
+        run: scripts/fetch-relay.sh
+
+      - name: Detect relay lock changes
+        id: relay_lock
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BEFORE_SHA: ${{ github.event.before }}
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          changed=false
+          case "$EVENT_NAME" in
+            pull_request) base_sha="$PR_BASE_SHA" ;;
+            push) base_sha="$BEFORE_SHA" ;;
+            workflow_dispatch)
+              changed=true
+              base_sha=""
+              ;;
+            *)
+              echo "Unsupported event: $EVENT_NAME" >&2
+              exit 1
+              ;;
+          esac
+          if [[ "$changed" == "false" ]]; then
+            if [[ ! "$base_sha" =~ ^[0-9a-f]{40}$ ]] ||
+               [[ "$base_sha" =~ ^0{40}$ ]] ||
+               ! git cat-file -e "${base_sha}^{commit}"; then
+              changed=true
+            elif ! git diff --quiet "$base_sha" "$GITHUB_SHA" -- relay.lock.json; then
+              changed=true
+            fi
+          fi
+          echo "changed=$changed" >>"$GITHUB_OUTPUT"
+
+      - name: Verify changed relay provenance
+        if: steps.relay_lock.outputs.changed == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
-        run: scripts/fetch-relay.sh
+        run: scripts/verify-relay-provenance.sh
 
       - name: Run unit tests
         run: ./gradlew --no-daemon --dependency-verification strict :app:testDebugUnitTest

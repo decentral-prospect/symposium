@@ -2305,6 +2305,7 @@ class RemoteInstaller(private val appContext: Context) {
             log "[6/8] Install isolated worker"
             [ -s "${'$'}SERVER_BINARY_SOURCE" ] || die "selected server binary is missing"
             install -o "${'$'}APP_USER" -g "${'$'}APP_GROUP" -m 0750 "${'$'}SERVER_BINARY_SOURCE" "${'$'}BINARY_DIR/${'$'}BINARY_NAME"
+            verify_server_binary "${'$'}BINARY_DIR/${'$'}BINARY_NAME" || die "installed server binary failed integrity verification"
             install -o "${'$'}APP_USER" -g "${'$'}APP_GROUP" -m 0600 /dev/null "${'$'}DATABASE_PATH"
             chown "${'$'}APP_USER:${'$'}APP_GROUP" "${'$'}TOKEN_PATH" "${'$'}CERTIFICATE_PATH" "${'$'}PRIVATE_KEY_PATH"
             chmod 600 "${'$'}TOKEN_PATH" "${'$'}PRIVATE_KEY_PATH"
