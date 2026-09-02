@@ -1,0 +1,192 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "*"
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: Build, attest, and publish
+    runs-on: ubuntu-22.04
+    timeout-minutes: 60
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    env:
+      CI: "true"
+      SYMPOSIUM_VERIFY_RELAY_ATTESTATION: "true"
+
+    steps:
+      - name: Check out tagged source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Validate Gradle wrapper
+        uses: gradle/actions/wrapper-validation@9c971963bec38e04b3d30dcc455b5382be2fdbfb # v6.3.0
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@dd06d9cba3e5552c54d9f8ea23572deb30010f7c # v6.0.0
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@9c971963bec38e04b3d30dcc455b5382be2fdbfb # v6.3.0
+
+      - name: Validate release tag and source
+        id: release_meta
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          version="$GITHUB_REF_NAME"
+          [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z]+([.-][0-9A-Za-z]+)*)?$ ]]
+          git merge-base --is-ancestor "$GITHUB_SHA" refs/remotes/origin/main
+          android_version="$(./gradlew --no-daemon --dependency-verification strict -q :app:printAndroidVersionName)"
+          [[ "$version" == "$android_version" ]]
+          if [[ "$version" == *-* ]]; then
+            prerelease=true
+          else
+            prerelease=false
+          fi
+          echo "version=$version" >>"$GITHUB_OUTPUT"
+          echo "prerelease=$prerelease" >>"$GITHUB_OUTPUT"
+
+      - name: Test relay lock tooling
+        run: scripts/test-relay-tools.sh
+
+      - name: Fetch and attest locked relay
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: scripts/fetch-relay.sh
+
+      - name: Reconstruct release keystore
+        env:
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          [[ -n "$ANDROID_KEYSTORE_BASE64" ]]
+          [[ -n "$ANDROID_KEYSTORE_PASSWORD" ]]
+          [[ -n "$ANDROID_KEY_ALIAS" ]]
+          [[ -n "$ANDROID_KEY_PASSWORD" ]]
+          keystore_path="$RUNNER_TEMP/symposium-release.jks"
+          printf '%s' "$ANDROID_KEYSTORE_BASE64" | base64 --decode >"$keystore_path"
+          [[ -s "$keystore_path" ]]
+          chmod 600 "$keystore_path"
+          echo "ANDROID_KEYSTORE_PATH=$keystore_path" >>"$GITHUB_ENV"
+
+      - name: Build signed APK and AAB
+        env:
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+          SYMPOSIUM_REQUIRE_RELEASE_SIGNING: "true"
+          TELEMETRY_ENDPOINT: ${{ secrets.TELEMETRY_ENDPOINT }}
+          TELEMETRY_TOKEN: ${{ secrets.TELEMETRY_TOKEN }}
+        run: >-
+          ./gradlew --no-daemon --dependency-verification strict
+          :app:assembleRelease :app:bundleRelease
+
+      - name: Stage and verify signed artifacts
+        env:
+          RELEASE_VERSION: ${{ steps.release_meta.outputs.version }}
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          release_dir="$RUNNER_TEMP/release"
+          mkdir -p "$release_dir"
+          apk="$release_dir/Symposium-$RELEASE_VERSION.apk"
+          aab="$release_dir/Symposium-$RELEASE_VERSION.aab"
+          install -m 0644 app/build/outputs/apk/release/app-release.apk "$apk"
+          install -m 0644 app/build/outputs/bundle/release/app-release.aab "$aab"
+          apksigner="$(find "$ANDROID_HOME/build-tools" -type f -name apksigner -print | sort -V | tail -n 1)"
+          [[ -x "$apksigner" ]]
+          "$apksigner" verify --verbose --print-certs "$apk"
+          "$JAVA_HOME/bin/jarsigner" -verify -strict -verbose "$aab"
+
+      - name: Generate CycloneDX SBOM from signed APK
+        uses: anchore/sbom-action@3ad7283483fc7af8ff2b4ea19663c2d5ca935e26 # v0.24.2
+        with:
+          file: ${{ runner.temp }}/release/Symposium-${{ steps.release_meta.outputs.version }}.apk
+          format: cyclonedx-json
+          output-file: ${{ runner.temp }}/release/Symposium-${{ steps.release_meta.outputs.version }}.cdx.json
+          syft-version: v1.51.1
+          upload-artifact: false
+          upload-release-assets: false
+          dependency-snapshot: false
+
+      - name: Validate SBOM and checksums
+        env:
+          RELEASE_VERSION: ${{ steps.release_meta.outputs.version }}
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cd "$RUNNER_TEMP/release"
+          sbom="Symposium-$RELEASE_VERSION.cdx.json"
+          [[ -s "$sbom" ]]
+          jq -e '.bomFormat == "CycloneDX" and (.specVersion | type == "string") and ((.components // []) | length > 0)' "$sbom" >/dev/null
+          sha256sum \
+            "Symposium-$RELEASE_VERSION.apk" \
+            "Symposium-$RELEASE_VERSION.aab" \
+            "$sbom" >SHA256SUMS
+          sha256sum --check SHA256SUMS
+
+      - name: Attest APK provenance
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-path: ${{ runner.temp }}/release/Symposium-${{ steps.release_meta.outputs.version }}.apk
+
+      - name: Attest AAB provenance
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-path: ${{ runner.temp }}/release/Symposium-${{ steps.release_meta.outputs.version }}.aab
+
+      - name: Attest APK CycloneDX SBOM
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-path: ${{ runner.temp }}/release/Symposium-${{ steps.release_meta.outputs.version }}.apk
+          sbom-path: ${{ runner.temp }}/release/Symposium-${{ steps.release_meta.outputs.version }}.cdx.json
+
+      - name: Create draft, upload assets, and publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_VERSION: ${{ steps.release_meta.outputs.version }}
+          IS_PRERELEASE: ${{ steps.release_meta.outputs.prerelease }}
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          if gh release view "$RELEASE_VERSION" -R "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "A GitHub Release already exists for $RELEASE_VERSION" >&2
+            exit 1
+          fi
+          release_args=(--verify-tag --draft --generate-notes --title "Symposium $RELEASE_VERSION")
+          if [[ "$IS_PRERELEASE" == "true" ]]; then
+            release_args+=(--prerelease)
+          fi
+          gh release create "$RELEASE_VERSION" -R "$GITHUB_REPOSITORY" "${release_args[@]}"
+          cd "$RUNNER_TEMP/release"
+          gh release upload "$RELEASE_VERSION" -R "$GITHUB_REPOSITORY" \
+            "Symposium-$RELEASE_VERSION.apk" \
+            "Symposium-$RELEASE_VERSION.aab" \
+            "Symposium-$RELEASE_VERSION.cdx.json" \
+            SHA256SUMS
+          uploaded="$(gh release view "$RELEASE_VERSION" -R "$GITHUB_REPOSITORY" --json assets --jq '.assets | map(.name) | sort | join("\n")')"
+          expected="$(printf '%s\n' SHA256SUMS "Symposium-$RELEASE_VERSION.aab" "Symposium-$RELEASE_VERSION.apk" "Symposium-$RELEASE_VERSION.cdx.json" | sort)"
+          [[ "$uploaded" == "$expected" ]]
+          gh release edit "$RELEASE_VERSION" -R "$GITHUB_REPOSITORY" --draft=false
+
+      - name: Remove reconstructed keystore
+        if: always()
+        shell: bash
+        run: rm -f -- "$RUNNER_TEMP/symposium-release.jks"

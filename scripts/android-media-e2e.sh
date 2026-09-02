@@ -3,7 +3,32 @@ set -Eeuo pipefail
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 android_dir="$(cd "$script_dir/.." && pwd)"
-relay_dir="$(cd "$android_dir/../S-server" && pwd)"
+relay_dir_input="${SYMPOSIUM_RELAY_DIR:-$android_dir/../S-server}"
+
+if [[ ! -d "$relay_dir_input" ]]; then
+    echo "Relay source directory does not exist: $relay_dir_input" >&2
+    echo "Set SYMPOSIUM_RELAY_DIR to an explicit symposium-relay checkout." >&2
+    exit 1
+fi
+relay_dir="$(cd "$relay_dir_input" && pwd)"
+
+if [[ ! -f "$relay_dir/go.mod" ]]; then
+    echo "Relay source directory does not contain go.mod: $relay_dir" >&2
+    exit 1
+fi
+
+if [[ -n "${SYMPOSIUM_RELAY_REVISION:-}" ]]; then
+    if ! git -C "$relay_dir" rev-parse --verify HEAD >/dev/null 2>&1; then
+        echo "SYMPOSIUM_RELAY_REVISION requires a Git relay checkout." >&2
+        exit 1
+    fi
+    expected_revision="$(git -C "$relay_dir" rev-parse "${SYMPOSIUM_RELAY_REVISION}^{commit}")"
+    actual_revision="$(git -C "$relay_dir" rev-parse HEAD)"
+    if [[ "$actual_revision" != "$expected_revision" ]]; then
+        echo "Relay checkout is at $actual_revision, expected $expected_revision." >&2
+        exit 1
+    fi
+fi
 
 relay_host="${SYMPOSIUM_E2E_RELAY_HOST:-10.0.2.2}"
 relay_port="${SYMPOSIUM_E2E_RELAY_PORT:-38443}"
@@ -119,7 +144,8 @@ moderator_key="$(jq -er '.moderator_key' <<<"$room_response")"
 # cannot consume the media verification timeout.
 (
     cd "$android_dir"
-    ./gradlew :app:assembleDebug :app:assembleDebugAndroidTest \
+    ./gradlew --dependency-verification strict \
+        :app:assembleDebug :app:assembleDebugAndroidTest \
         -PTELEMETRY_ENDPOINT= \
         -PTELEMETRY_TOKEN=
 )
@@ -155,7 +181,7 @@ fi
 
 (
     cd "$android_dir"
-    timeout 180s ./gradlew connectedDebugAndroidTest \
+    timeout 180s ./gradlew --dependency-verification strict connectedDebugAndroidTest \
         -PTELEMETRY_ENDPOINT= \
         -PTELEMETRY_TOKEN= \
         -Pandroid.testInstrumentationRunnerArguments.class=com.decentralprospect.symposium.AndroidMediaE2ETest \

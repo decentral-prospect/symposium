@@ -1,0 +1,63 @@
+name: CI
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test-and-build:
+    name: Test and build
+    runs-on: ubuntu-22.04
+    timeout-minutes: 45
+    env:
+      CI: "true"
+      SYMPOSIUM_VERIFY_RELAY_ATTESTATION: "true"
+      TELEMETRY_ENDPOINT: ""
+      TELEMETRY_TOKEN: ""
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Validate Gradle wrapper
+        uses: gradle/actions/wrapper-validation@9c971963bec38e04b3d30dcc455b5382be2fdbfb # v6.3.0
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@dd06d9cba3e5552c54d9f8ea23572deb30010f7c # v6.0.0
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@9c971963bec38e04b3d30dcc455b5382be2fdbfb # v6.3.0
+
+      - name: Test relay lock tooling
+        run: scripts/test-relay-tools.sh
+
+      - name: Fetch and attest locked relay
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: scripts/fetch-relay.sh
+
+      - name: Run unit tests
+        run: ./gradlew --no-daemon --dependency-verification strict :app:testDebugUnitTest
+
+      - name: Run Android lint
+        run: ./gradlew --no-daemon --dependency-verification strict :app:lintDebug
+
+      - name: Build debug and unsigned release variants
+        run: >-
+          ./gradlew --no-daemon --dependency-verification strict
+          :app:assembleDebug :app:assembleRelease

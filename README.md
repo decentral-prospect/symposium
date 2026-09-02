@@ -65,7 +65,10 @@ Examples include:
 
 No conference content, audio, video, messages, or participant identities are transmitted through telemetry systems.
 
-Set `TELEMETRY_ENDPOINT` and `TELEMETRY_TOKEN` as Gradle properties to enable delivery. If the endpoint is empty, no telemetry leaves the device.
+Set `TELEMETRY_ENDPOINT` and `TELEMETRY_TOKEN` as Gradle properties or
+environment variables to enable delivery. If the endpoint is empty, no telemetry
+leaves the device. Do not commit these values to `gradle.properties`. Values
+embedded in an Android APK can be extracted and are not a strong secret boundary.
 
 
 
@@ -140,6 +143,9 @@ appears in the relay log. Start an Android emulator or connect a device, then ru
 
 The runner defaults to the Android Emulator host alias `10.0.2.2`. For a physical
 device, set `SYMPOSIUM_E2E_RELAY_HOST` to the development machine's LAN address.
+Set `SYMPOSIUM_RELAY_DIR` to an explicit `symposium-relay` checkout when it is
+not available at the legacy sibling path; `SYMPOSIUM_RELAY_REVISION` can require
+an exact tag or commit.
 An AVD without an audio input can test every path except Android outbound audio
 with `SYMPOSIUM_ANDROID_E2E_REQUIRE_OUTBOUND_AUDIO=false`; physical-device and CI
 runs require it by default.
