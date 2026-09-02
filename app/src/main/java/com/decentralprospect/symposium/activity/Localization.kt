@@ -102,6 +102,14 @@ private val russianToEnglish = mapOf(
     "Меню" to "Menu",
     "Настройки" to "Settings",
     "О приложении" to "About",
+    "Поддержка" to "Support",
+    "Поддержка в Telegram" to "Telegram support",
+    "Электронная почта" to "Email",
+    "Не удалось открыть приложение" to "Could not open the app",
+    "Доступно обновление" to "Update available",
+    "Доступна новая версия Symposium." to "A new version of Symposium is available.",
+    "Обновить приложение можно на сайте Symposium. Новости о выпусках доступны в Telegram-канале." to "You can update the app on the Symposium website. Release news is available in the Telegram channel.",
+    "Открыть сайт" to "Open website",
     "Управление серверами" to "Manage servers",
     "МОД" to "MOD",
     "Управляйте серверами, комнатами и настройками" to "Manage servers, rooms, and settings",
@@ -396,6 +404,8 @@ internal fun tr(text: String): String {
     return when {
         text.startsWith("Тема: ") -> "Theme: " + tr(text.removePrefix("Тема: "))
         text.startsWith("Версия: ") -> "Version: " + text.removePrefix("Версия: ")
+        text.startsWith("Установленная версия: ") -> "Installed version: " + text.removePrefix("Установленная версия: ")
+        text.startsWith("Доступная версия: ") -> "Available version: " + text.removePrefix("Доступная версия: ")
         text.startsWith("Комната: ") -> "Room: " + text.removePrefix("Комната: ")
         text.startsWith("Открытых комнат: ") -> "Open rooms: " + text.removePrefix("Открытых комнат: ")
         text.startsWith("Инфо: ") -> "Info: " + text.removePrefix("Инфо: ")
