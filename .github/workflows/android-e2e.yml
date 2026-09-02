@@ -1,0 +1,82 @@
+name: Android media E2E
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "23 5 * * 1"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: android-media-e2e-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  media-e2e:
+    name: Android media E2E
+    runs-on: ubuntu-22.04
+    timeout-minutes: 60
+    env:
+      CI: "true"
+      SYMPOSIUM_ANDROID_E2E_REQUIRE_OUTBOUND_AUDIO: "false"
+      TELEMETRY_ENDPOINT: ""
+      TELEMETRY_TOKEN: ""
+
+    steps:
+      - name: Check out Android source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Validate Gradle wrapper
+        uses: gradle/actions/wrapper-validation@9c971963bec38e04b3d30dcc455b5382be2fdbfb # v6.3.0
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@dd06d9cba3e5552c54d9f8ea23572deb30010f7c # v6.0.0
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@9c971963bec38e04b3d30dcc455b5382be2fdbfb # v6.3.0
+
+      - name: Check out locked relay source
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          relay_version="$(jq -er '.version' relay.lock.json)"
+          [[ "$relay_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z]+([.-][0-9A-Za-z]+)*)?$ ]]
+          relay_dir="$RUNNER_TEMP/symposium-relay"
+          git init "$relay_dir"
+          git -C "$relay_dir" remote add origin https://github.com/decentral-prospect/symposium-relay.git
+          git -C "$relay_dir" fetch --depth=1 origin "refs/tags/$relay_version:refs/tags/$relay_version"
+          git -C "$relay_dir" checkout --detach "refs/tags/$relay_version"
+          relay_revision="$(git -C "$relay_dir" rev-parse HEAD)"
+          [[ "$relay_revision" =~ ^[0-9a-f]{40}$ ]]
+          echo "SYMPOSIUM_RELAY_DIR=$relay_dir" >>"$GITHUB_ENV"
+          echo "SYMPOSIUM_RELAY_REVISION=$relay_revision" >>"$GITHUB_ENV"
+
+      - name: Set up Go from locked relay
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: ${{ runner.temp }}/symposium-relay/go.mod
+          cache-dependency-path: ${{ runner.temp }}/symposium-relay/go.sum
+
+      - name: Test relay lock tooling
+        run: scripts/test-relay-tools.sh
+
+      - name: Fetch locked relay
+        run: scripts/fetch-relay.sh
+
+      - name: Run Android emulator media E2E
+        uses: ReactiveCircus/android-emulator-runner@a421e43855164a8197daf9d8d40fe71c6996bb0d # v2.38.0
+        with:
+          api-level: 35
+          arch: x86_64
+          target: google_apis
+          disable-animations: true
+          emulator-options: >-
+            -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim
+            -camera-back none -camera-front none
+          script: ./scripts/android-media-e2e.sh

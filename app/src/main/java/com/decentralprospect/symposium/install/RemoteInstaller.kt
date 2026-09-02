@@ -73,6 +73,18 @@ data class DeploymentProfile(
     val adminToken: String
 )
 
+internal data class RelayReleaseMetadata(
+    val version: String,
+    val downloadUrl: String,
+    val sha256: String
+)
+
+internal fun configuredRelayRelease(): RelayReleaseMetadata = RelayReleaseMetadata(
+    version = BuildConfig.RELAY_RELEASE_VERSION,
+    downloadUrl = BuildConfig.RELAY_BINARY_URL,
+    sha256 = BuildConfig.RELAY_BINARY_SHA256
+)
+
 private fun deploymentProfileToJson(profile: DeploymentProfile): JSONObject = JSONObject()
     .put("appDir", profile.appDir)
     .put("serviceName", profile.serviceName)
@@ -1990,6 +2002,7 @@ class RemoteInstaller(private val appContext: Context) {
     }
 
     private fun renderInstallScript(profile: DeploymentProfile, serverIp: String): String {
+        val relayRelease = configuredRelayRelease()
         val replacements = mapOf(
             "@@SERVER_IP@@" to shQuote(serverIp),
             "@@APP_DIR@@" to shQuote(profile.appDir),
@@ -2014,8 +2027,9 @@ class RemoteInstaller(private val appContext: Context) {
             "@@ICE_MAX@@" to profile.iceUdpPortMax.toString(),
             "@@FIREWALL_TAG@@" to shQuote(profile.firewallTag),
             "@@ADMIN_TOKEN@@" to shQuote(profile.adminToken),
-            "@@RELAY_DOWNLOAD_URL@@" to GITHUB_SERVER_BINARY_URL,
-            "@@RELAY_SHA256@@" to BuildConfig.RELAY_BINARY_SHA256
+            "@@RELAY_RELEASE_VERSION@@" to relayRelease.version,
+            "@@RELAY_DOWNLOAD_URL@@" to relayRelease.downloadUrl,
+            "@@RELAY_SHA256@@" to relayRelease.sha256
         )
         return replacements.entries.fold(ISOLATED_INSTALL_SCRIPT) { script, entry ->
             script.replace(entry.key, entry.value)
@@ -2056,8 +2070,6 @@ class RemoteInstaller(private val appContext: Context) {
         private const val ADMIN_TOKEN_PATH = "/opt/symposium-server/admin-token"
         private const val OPEN_ROOMS_DB_PATH = "/opt/symposium-server/open_rooms.db"
         private const val SERVER_BIN_ASSET_PATH = "symposium/symposium-server-linux-amd64"
-        private val GITHUB_SERVER_BINARY_URL =
-            "https://github.com/decentral-prospect/symposium-relay/releases/download/$APP_VERSION_NAME/symposium-server-linux-amd64"
         private const val RELAY_DOWNLOAD_FAILED_MARKER = "RELAY_DOWNLOAD_FAILED"
         private const val EXISTING_INSTALL_FOUND_MARKER = "EXISTING_INSTALL_FOUND"
         private const val EXISTING_DEPLOYMENT_UNHEALTHY_EXIT_CODE = 42
@@ -2147,6 +2159,7 @@ class RemoteInstaller(private val appContext: Context) {
             FIREWALL_TAG=@@FIREWALL_TAG@@
             ADMIN_TOKEN=@@ADMIN_TOKEN@@
             SCRIPT_DIR="${'$'}(cd "${'$'}(dirname "${'$'}{BASH_SOURCE[0]}")" && pwd)"
+            RELAY_RELEASE_VERSION="@@RELAY_RELEASE_VERSION@@"
             RELAY_DOWNLOAD_URL="${'$'}{SYMPOSIUM_RELAY_DOWNLOAD_URL:-@@RELAY_DOWNLOAD_URL@@}"
             RELAY_EXPECTED_SHA256="@@RELAY_SHA256@@"
             LOCAL_BINARY="${'$'}SCRIPT_DIR/${'$'}BINARY_NAME.src"
@@ -2205,7 +2218,7 @@ class RemoteInstaller(private val appContext: Context) {
             download_release_binary() {
               local tmp="${'$'}{DOWNLOADED_BINARY}.part"
               rm -f "${'$'}DOWNLOADED_BINARY" "${'$'}tmp"
-              log "Downloading SymposiumRelay from GitHub Release"
+              log "Downloading SymposiumRelay ${'$'}RELAY_RELEASE_VERSION from GitHub Release"
 
               set +e
               curl -fL --show-error --connect-timeout 15 --max-time 900 \
@@ -2292,6 +2305,7 @@ class RemoteInstaller(private val appContext: Context) {
             log "[6/8] Install isolated worker"
             [ -s "${'$'}SERVER_BINARY_SOURCE" ] || die "selected server binary is missing"
             install -o "${'$'}APP_USER" -g "${'$'}APP_GROUP" -m 0750 "${'$'}SERVER_BINARY_SOURCE" "${'$'}BINARY_DIR/${'$'}BINARY_NAME"
+            verify_server_binary "${'$'}BINARY_DIR/${'$'}BINARY_NAME" || die "installed server binary failed integrity verification"
             install -o "${'$'}APP_USER" -g "${'$'}APP_GROUP" -m 0600 /dev/null "${'$'}DATABASE_PATH"
             chown "${'$'}APP_USER:${'$'}APP_GROUP" "${'$'}TOKEN_PATH" "${'$'}CERTIFICATE_PATH" "${'$'}PRIVATE_KEY_PATH"
             chmod 600 "${'$'}TOKEN_PATH" "${'$'}PRIVATE_KEY_PATH"
@@ -2367,7 +2381,7 @@ class RemoteInstaller(private val appContext: Context) {
             ROOMS_DB="${'$'}{APP_DIR}/open_rooms.db"
             ADMIN_TOKEN_FILE="${'$'}{APP_DIR}/admin-token"
             SCRIPT_DIR="${'$'}(cd "${'$'}(dirname "${'$'}{BASH_SOURCE[0]}")" && pwd)"
-            RELAY_DOWNLOAD_URL="${'$'}{SYMPOSIUM_RELAY_DOWNLOAD_URL:-$GITHUB_SERVER_BINARY_URL}"
+            RELAY_DOWNLOAD_URL="${'$'}{SYMPOSIUM_RELAY_DOWNLOAD_URL:-${BuildConfig.RELAY_BINARY_URL}}"
             LOCAL_BINARY="${'$'}{SCRIPT_DIR}/symposium-server"
             DOWNLOADED_BINARY="${'$'}{SCRIPT_DIR}/symposium-server.download"
             SERVER_BINARY_SOURCE=""

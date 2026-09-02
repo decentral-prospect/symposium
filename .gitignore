@@ -4,6 +4,8 @@
 
 # Gradle
 .gradle/
+.kotlin/
+*.hprof
 
 # Local config
 local.properties
@@ -18,6 +20,10 @@ local.properties
 /captures/
 /.externalNativeBuild/
 /.cxx/
+*.apk
+*.aab
+*.jks
+*.keystore
 
 # Symposium bundled server binary
 app/src/main/assets/symposium/symposium-server-linux-amd64

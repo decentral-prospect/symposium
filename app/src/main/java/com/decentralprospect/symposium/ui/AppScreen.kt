@@ -4,6 +4,8 @@ import android.app.Activity
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
+import android.content.Intent
+import android.net.Uri
 import android.os.Handler
 import android.os.Looper
 import android.widget.Toast
@@ -30,10 +32,12 @@ import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material.icons.outlined.Home
 import androidx.compose.material.icons.outlined.Settings
 import androidx.compose.material.icons.filled.GridView
+import androidx.compose.material.icons.filled.Email
 import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.KeyboardArrowUp
 import androidx.compose.material.icons.filled.Settings
+import androidx.compose.material.icons.filled.SupportAgent
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
@@ -53,6 +57,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -208,6 +213,8 @@ internal fun AppScreen(
     var currentScreen by remember { mutableStateOf(RootScreen.HOME) }
     var serversRefreshNonce by remember { mutableStateOf(0) }
     var callViewMode by remember { mutableStateOf(CallViewMode.FOCUS) }
+    var availableUpdateVersion by rememberSaveable { mutableStateOf<String?>(null) }
+    var updateNotificationDismissed by rememberSaveable { mutableStateOf(false) }
     val mainHandler = remember { Handler(Looper.getMainLooper()) }
     var lastBackPressAt by remember { mutableStateOf(0L) }
 
@@ -739,6 +746,9 @@ internal fun AppScreen(
         accessibilityFontScale = initialAccessibilityFontScale
     }
 
+    LaunchedEffect(appVersion) {
+        availableUpdateVersion = AppUpdateChecker.findAvailableVersion(appVersion)
+    }
 
     if (!telemetryPromptShown) {
         TelemetryConsentDialog(
@@ -746,6 +756,30 @@ internal fun AppScreen(
             onSkip = { onTelemetryConsentResult(false) }
         )
     }
+
+    availableUpdateVersion
+        ?.takeIf { telemetryPromptShown && !updateNotificationDismissed }
+        ?.let { remoteVersion ->
+            UpdateAvailableDialog(
+                currentVersion = appVersion,
+                availableVersion = remoteVersion,
+                onDismiss = { updateNotificationDismissed = true },
+                onOpenSite = {
+                    updateNotificationDismissed = true
+                    openExternalIntent(
+                        context,
+                        Intent(Intent.ACTION_VIEW, Uri.parse("https://symposium-dp.app"))
+                    )
+                },
+                onOpenTelegram = {
+                    updateNotificationDismissed = true
+                    openExternalIntent(
+                        context,
+                        Intent(Intent.ACTION_VIEW, Uri.parse("https://t.me/symposium_app"))
+                    )
+                }
+            )
+        }
 
     BackHandler {
         when {
@@ -1563,7 +1597,7 @@ internal fun AppScreen(
                             }
                         )
                     }
-                    RootScreen.ABOUT -> PlaceholderScreen(title = "О приложении", subtitle = "Версия: $appVersion")
+                    RootScreen.ABOUT -> AboutScreen(appVersion = appVersion)
                 }
 
                 ReconnectOverlay(
@@ -1681,6 +1715,60 @@ internal fun TelemetryConsentDialog(
                 label = "Включить",
                 onClick = onEnable,
                 kind = ActionButtonKind.PRIMARY,
+                modifier = Modifier.weight(1f)
+            )
+        }
+    )
+}
+
+@Composable
+internal fun UpdateAvailableDialog(
+    currentVersion: String,
+    availableVersion: String,
+    onDismiss: () -> Unit,
+    onOpenSite: () -> Unit,
+    onOpenTelegram: () -> Unit
+) {
+    AppDialog(
+        title = "Доступно обновление",
+        onDismiss = onDismiss,
+        content = {
+            Text(
+                text = "Доступна новая версия Symposium.",
+                color = appTextPrimaryColor(),
+                fontSize = 15.sp,
+                lineHeight = 21.sp
+            )
+            Text(
+                text = "Установленная версия: $currentVersion",
+                color = appTextSecondaryColor(),
+                fontSize = 13.sp,
+                lineHeight = 18.sp
+            )
+            Text(
+                text = "Доступная версия: $availableVersion",
+                color = appTextSecondaryColor(),
+                fontSize = 13.sp,
+                lineHeight = 18.sp
+            )
+            Text(
+                text = "Обновить приложение можно на сайте Symposium. Новости о выпусках доступны в Telegram-канале.",
+                color = appTextSecondaryColor(),
+                fontSize = 13.sp,
+                lineHeight = 18.sp
+            )
+        },
+        actions = {
+            ActionButton(
+                label = "Открыть сайт",
+                onClick = onOpenSite,
+                kind = ActionButtonKind.PRIMARY,
+                modifier = Modifier.weight(1f)
+            )
+            ActionButton(
+                label = "Telegram",
+                onClick = onOpenTelegram,
+                kind = ActionButtonKind.SECONDARY,
                 modifier = Modifier.weight(1f)
             )
         }
@@ -2007,18 +2095,69 @@ internal fun MenuNavButton(
 }
 
 @Composable
-internal fun PlaceholderScreen(title: String, subtitle: String) {
+internal fun AboutScreen(appVersion: String) {
+    val context = LocalContext.current
+
     Column(
         modifier = Modifier
             .fillMaxSize()
             .padding(top = 18.dp),
-        verticalArrangement = Arrangement.spacedBy(8.dp)
+        verticalArrangement = Arrangement.spacedBy(12.dp)
     ) {
         Text(
-            text = title,
+            text = "О приложении",
             color = appTextPrimaryColor(),
             fontSize = 22.sp,
         )
-        Text(subtitle, color = appTextSecondaryColor(), fontSize = 14.sp)
+        Text("Версия: $appVersion", color = appTextSecondaryColor(), fontSize = 14.sp)
+
+        Text(
+            text = "Поддержка",
+            color = appTextPrimaryColor(),
+            fontSize = 17.sp,
+            fontWeight = FontWeight.SemiBold,
+            modifier = Modifier.padding(top = 8.dp)
+        )
+
+        MenuNavButton(
+            label = "Поддержка в Telegram",
+            subtitle = "@symposium_support_bot",
+            icon = Icons.Filled.SupportAgent,
+            onClick = {
+                openExternalIntent(
+                    context,
+                    Intent(
+                        Intent.ACTION_VIEW,
+                        Uri.parse("https://t.me/symposium_support_bot")
+                    )
+                )
+            }
+        )
+
+        MenuNavButton(
+            label = "Электронная почта",
+            subtitle = "support@symposium-dp.app",
+            icon = Icons.Filled.Email,
+            onClick = {
+                openExternalIntent(
+                    context,
+                    Intent(
+                        Intent.ACTION_SENDTO,
+                        Uri.parse("mailto:support@symposium-dp.app")
+                    )
+                )
+            }
+        )
     }
+}
+
+private fun openExternalIntent(context: Context, intent: Intent) {
+    runCatching { context.startActivity(intent) }
+        .onFailure {
+            Toast.makeText(
+                context,
+                tr("Не удалось открыть приложение"),
+                Toast.LENGTH_SHORT
+            ).show()
+        }
 }
