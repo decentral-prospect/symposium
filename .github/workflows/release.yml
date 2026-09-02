@@ -12,6 +12,7 @@ concurrency:
 jobs:
   release:
     name: Build, attest, and publish
+    environment: release
     runs-on: ubuntu-22.04
     timeout-minutes: 60
     permissions:
