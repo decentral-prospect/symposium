@@ -1,7 +1,7 @@
 {
   "repository": "decentral-prospect/symposium-relay",
-  "version": "0.3.4-rc.2",
+  "version": "0.3.4",
   "asset": "symposium-server-linux-amd64",
-  "url": "https://github.com/decentral-prospect/symposium-relay/releases/download/0.3.4-rc.2/symposium-server-linux-amd64",
-  "sha256": "3c4aa440256274d8222b2dd66bf2c8f83ffc0613ff858319f4a5d71c1943b23b"
+  "url": "https://github.com/decentral-prospect/symposium-relay/releases/download/0.3.4/symposium-server-linux-amd64",
+  "sha256": "a70c2ab73658d3423cc1dcbcc0b35c5f074eb8bdcef4dccae661b7df5cbafe8d"
 }
