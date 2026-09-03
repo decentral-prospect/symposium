@@ -133,7 +133,7 @@ private val russianToEnglish = mapOf(
     "Название комнаты" to "Room name",
     "Новая встреча" to "New meeting",
     "Подключение к конференции" to "Join conference",
-    "Не телефонный разговор" to "Not a phone call",
+    "Не телефонный разговор" to "Not a phone conversation",
     "Вы можете оставить поле \"Имя\" пустым" to "You can leave the Name field empty",
     "Подключение к серверу…" to "Connecting to server…",
     "Подключаемся к комнате" to "Connecting to room",
