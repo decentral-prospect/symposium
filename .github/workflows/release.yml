@@ -118,16 +118,21 @@ jobs:
           "$apksigner" verify --verbose --print-certs "$apk"
           "$JAVA_HOME/bin/jarsigner" -verify -verbose -certs "$aab"
 
-      - name: Generate CycloneDX SBOM from signed APK
-        uses: anchore/sbom-action@3ad7283483fc7af8ff2b4ea19663c2d5ca935e26 # v0.24.2
-        with:
-          file: ${{ runner.temp }}/release/Symposium-${{ steps.release_meta.outputs.version }}.apk
-          format: cyclonedx-json
-          output-file: ${{ runner.temp }}/release/Symposium-${{ steps.release_meta.outputs.version }}.cdx.json
-          syft-version: v1.51.1
-          upload-artifact: false
-          upload-release-assets: false
-          dependency-snapshot: false
+      - name: Generate CycloneDX SBOM from Gradle dependency graph
+        env:
+          RELEASE_VERSION: ${{ steps.release_meta.outputs.version }}
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          ./gradlew \
+            --no-daemon \
+            --dependency-verification strict \
+            cyclonedxBom
+          source_sbom="build/reports/cyclonedx/bom.json"
+          target_sbom="$RUNNER_TEMP/release/Symposium-$RELEASE_VERSION.cdx.json"
+          [[ -s "$source_sbom" ]]
+          install -m 0644 "$source_sbom" "$target_sbom"
+          [[ -s "$target_sbom" ]]
 
       - name: Validate SBOM and checksums
         env:
@@ -138,11 +143,27 @@ jobs:
           cd "$RUNNER_TEMP/release"
           sbom="Symposium-$RELEASE_VERSION.cdx.json"
           [[ -s "$sbom" ]]
-          jq -e '.bomFormat == "CycloneDX" and (.specVersion | type == "string") and ((.components // []) | length > 0)' "$sbom" >/dev/null
+          jq -e '
+            .bomFormat == "CycloneDX"
+            and (.specVersion | type == "string")
+            and .metadata.component.name == "Symposium"
+            and .metadata.component.version == env.RELEASE_VERSION
+            and ((.components // []) | length > 0)
+            and ((.dependencies // []) | length > 0)
+          ' "$sbom" >/dev/null
+          echo "CycloneDX SBOM validated:"
+          jq '{
+            bomFormat,
+            specVersion,
+            application: .metadata.component.name,
+            version: .metadata.component.version,
+            componentCount: ((.components // []) | length),
+            dependencyRelations: ((.dependencies // []) | length)
+          }' "$sbom"
           sha256sum \
             "Symposium-$RELEASE_VERSION.apk" \
             "Symposium-$RELEASE_VERSION.aab" \
-            "$sbom" >SHA256SUMS
+            "$sbom" > SHA256SUMS
           sha256sum --check SHA256SUMS
 
       - name: Attest APK provenance
@@ -159,6 +180,12 @@ jobs:
         uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
         with:
           subject-path: ${{ runner.temp }}/release/Symposium-${{ steps.release_meta.outputs.version }}.apk
+          sbom-path: ${{ runner.temp }}/release/Symposium-${{ steps.release_meta.outputs.version }}.cdx.json
+
+      - name: Attest AAB CycloneDX SBOM
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-path: ${{ runner.temp }}/release/Symposium-${{ steps.release_meta.outputs.version }}.aab
           sbom-path: ${{ runner.temp }}/release/Symposium-${{ steps.release_meta.outputs.version }}.cdx.json
 
       - name: Create draft, upload assets, and publish
